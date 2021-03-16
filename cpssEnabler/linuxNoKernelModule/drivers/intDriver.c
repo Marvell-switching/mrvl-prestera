@@ -154,6 +154,7 @@ static void free_interrupt_slot(int slot)
 {
 	struct interrupt_slot *sl = &(mvIntDrv_slots[slot]);
 
+	disable_irq(sl->irq);
 	enable_irq(sl->irq);
 	free_irq(sl->irq, (void*)&(sl->tasklet));
 	tasklet_kill(&(sl->tasklet));
