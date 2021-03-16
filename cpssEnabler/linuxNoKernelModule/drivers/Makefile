@@ -1,9 +1,12 @@
 # -*-makefile-*-
 # call from kernel build system
 
-TARGETS = mvDmaDrv mvIntDrv mvEthDrv
+TARGETS = mvDmaDrv mvIntDrv
 ifeq (CPU_ARM_zImage, $(CPU_FAMILY)_$(LSP_KERNEL_TYPE))
 TARGETS += mvMbusDrv
+endif
+ifeq ("$(TARGET)", "armv8")
+TARGETS += mvEthDrv
 endif
 
 ifneq ($(KERNELRELEASE),)
@@ -20,9 +23,11 @@ ccflags-y := -I$(HOME_DIR)common/h
 obj-m := $(addsuffix .o,$(TARGETS))
 mvDmaDrv-y := dmaDriver.o
 mvIntDrv-y := intDriver.o
-mvEthDrv-y := ethDriver.o
 ifeq (CPU_ARM_zImage, $(CPU_FAMILY)_$(LSP_KERNEL_TYPE))
 mvMbusDrv-y := mbusDriver.o mbusResources.o
+endif
+ifeq ("$(TARGET)", "armv8")
+mvEthDrv-y := ethDriver.o
 endif
 
 else

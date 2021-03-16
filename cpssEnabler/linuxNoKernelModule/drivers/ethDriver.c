@@ -84,6 +84,7 @@ MODULE_LICENSE("GPL");
 #define REG_ADDR_SDMA_CONF	REG_ADDR_BASE + 0x2800
 #define REG_ADDR_TX_MASK_0	REG_ADDR_BASE + 0x2818
 #define REG_ADDR_CAUSE_0	REG_ADDR_BASE + 0x0030
+#define REG_ADDR_PG_CFG_QUEUE	REG_ADDR_BASE + 0x28B0
 
 /* Array based registers index formulas */
 enum {
@@ -93,6 +94,7 @@ enum {
 	REG_ADDR_MG_SIZE_OFFSET_FORMULA		= 0x8,
 	REG_ADDR_MG_HA_OFFSET_FORMULA		= 0x4,
 	REG_ADDR_MG_CONTROL_OFFSET_FORMULA	= 0x4,
+	REG_ADDR_PG_CFG_QUEUE_OFFSET_FORMULA	= 0x4,
 };
 
 /* TX descriptor status/command field bits */
@@ -1401,7 +1403,7 @@ static ssize_t mvppnd_store_rx_queues(struct kobject *kobj,
 	    (unlikely(ppdev->atu_win == -1))) {
 		dev_err(&ppdev->pdev->dev,
 			"Required atu_win configuration is missing\n");
-		return -1;
+		return -ENOSYS;
 	}
 
 	mvppnd_sysfs_set_read_only(ppdev, attr);
@@ -1424,6 +1426,7 @@ static ssize_t mvppnd_store_rx_queues(struct kobject *kobj,
 		} else {
 			ppdev->rx_queues[j] = -1;
 		}
+
 	return count;
 }
 
@@ -1458,17 +1461,29 @@ static ssize_t mvppnd_store_tx_queue(struct kobject *kobj,
 	    (unlikely(ppdev->atu_win == -1))) {
 		dev_err(&ppdev->pdev->dev,
 			"Required atu_win configuration is missing\n");
-		return -1;
+		return -ENOSYS;
 	}
-
-	mvppnd_sysfs_set_read_only(ppdev, attr);
 
 	if ((sscanf(buf, "%d", &ppdev->tx_queue) != 1) ||
 	    (ppdev->tx_queue < -1) || (ppdev->tx_queue >= NUM_OF_TX_QUEUES)) {
 		dev_err(&ppdev->pdev->dev,
 			"Invalid queue number %d\n", ppdev->tx_queue);
 		ppdev->tx_queue = -1;
+		return -EINVAL;
 	}
+
+	/* Verify that the requested queue is not used by Packet Generator */
+	if (mvppnd_read_reg(ppdev, REG_ADDR_PG_CFG_QUEUE +
+			    REG_ADDR_PG_CFG_QUEUE_OFFSET_FORMULA *
+			    ppdev->tx_queue)) {
+		dev_err(&ppdev->pdev->dev,
+			"Queue %d is used by Packet Generator\n",
+			ppdev->tx_queue);
+		ppdev->tx_queue = -1;
+		return -EINVAL;
+	}
+
+	mvppnd_sysfs_set_read_only(ppdev, attr);
 
 	return count;
 }
@@ -1521,6 +1536,7 @@ static ssize_t mvppnd_store_atu_win(struct kobject *kobj,
 			"Invalid atu_win number %d, disabling\n",
 			ppdev->atu_win);
 		ppdev->atu_win = -1;
+		return -EINVAL;
 	}
 
 	debug_print_some_registers(ppdev);
