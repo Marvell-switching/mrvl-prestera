@@ -177,6 +177,7 @@ static int mvDmaDrv_mmap(struct file * file, struct vm_area_struct *vma)
             return -ENXIO;
         }
 
+#if 0 /* in armhf-32, 64bit mod operator is undefined - unknown symbol __aeabi_uldivmod */
         /* If allocated phsical address (m->dma) is not aligned with size, which is a Prestera req,
            for example 0xb0500000 not aligned with 0x200000 do:
         1. Free DMA
@@ -208,6 +209,7 @@ static int mvDmaDrv_mmap(struct file * file, struct vm_area_struct *vma)
                 return -ENXIO;
             }
         }
+#endif
 
         printk("dma_alloc_coherent() virt=%p dma=0x%llx\n", m->virt, (unsigned long long)m->dma);
 
