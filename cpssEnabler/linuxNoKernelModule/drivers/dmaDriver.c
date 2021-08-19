@@ -71,7 +71,7 @@ disclaimer.
 #include <linux/dma-mapping.h>
 #include <linux/io.h>
 #include <linux/kallsyms.h>
-
+#include <asm/div64.h>
 /* TODO: include prvExtDrvLinuxMapping.h */
 #ifdef MTS_BUILD
 #  define LINUX_VMA_DMABASE       0x19000000UL
@@ -106,6 +106,11 @@ struct dma_mapping {
 };
 
 static struct dma_mapping *shared_dmaBlock = NULL;
+
+/* Wrapper for do_div(). It does inplace division */
+static noinline uint32_t mvDmaDrv_modulo(uint64_t num, uint64_t div) {
+    return do_div(num, div);
+}
 
 static void free_dma_block(struct dma_mapping *m)
 {
@@ -177,7 +182,6 @@ static int mvDmaDrv_mmap(struct file * file, struct vm_area_struct *vma)
             return -ENXIO;
         }
 
-#if 0 /* in armhf-32, 64bit mod operator is undefined - unknown symbol __aeabi_uldivmod */
         /* If allocated phsical address (m->dma) is not aligned with size, which is a Prestera req,
            for example 0xb0500000 not aligned with 0x200000 do:
         1. Free DMA
@@ -186,9 +190,12 @@ static int mvDmaDrv_mmap(struct file * file, struct vm_area_struct *vma)
         4. free (2)
         5. Check if aligned
         */
-        if (m->dma % m->size) {
+        /* 64bit modulo division is undefined in 32bit armhf
+         * mvDmaDrv_modulo() uses kernel do_div() to calculate modulo
+         */
+        if (mvDmaDrv_modulo(m->dma, m->size)) {
             struct dma_mapping m_1 = *m;
-            m_1.size = m->size - ( m->dma % m->size );
+            m_1.size = m->size - mvDmaDrv_modulo(m->dma, m->size);
 
             printk("dma_alloc_coherent() is not aligned. Reallocating\n");
             free_dma_block(m);
@@ -203,13 +210,12 @@ static int mvDmaDrv_mmap(struct file * file, struct vm_area_struct *vma)
                 printk("dma_alloc_coherent() failed to allocate 0%x bytes\n",(unsigned)m->size);
                 return -ENXIO;
             }
-            if (m->dma % m->size) {
+            if (mvDmaDrv_modulo(m->dma, m->size)) {
                 printk("dma_alloc_coherent() failed to allocate aligned size of 0x%x for physical 0x%lx\n",(unsigned)m->size, (unsigned long)m->dma);
                 free_dma_block(m);
                 return -ENXIO;
             }
         }
-#endif
 
         printk("dma_alloc_coherent() virt=%p dma=0x%llx\n", m->virt, (unsigned long long)m->dma);
 
