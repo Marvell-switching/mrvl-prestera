@@ -56,6 +56,7 @@ disclaimer.
 #define MV_DRV_MAJOR    244
 #define MV_DRV_MINOR    4
 #define MV_DRV_FOPS     mvIntDrv_fops
+#define MV_DRV_PREINIT  mvIntDrv_PreInitDrv
 #define MV_DRV_POSTINIT mvIntDrv_postInitDrv
 #define MV_DRV_RELEASE  mvIntDrv_releaseDrv
 #include "mvDriverTemplate.h"
@@ -67,6 +68,7 @@ disclaimer.
 
 static int mvIntDrvNumOpened = 0;
 static struct semaphore	*mvIntDrvInterrupsSema; /* Alert other modules on interrupt */
+static struct semaphore mvint_pci_devs_sem;
 
 struct interrupt_slot {
 	int			used;
@@ -77,6 +79,50 @@ struct interrupt_slot {
 
 #define MAX_INTERRUPTS 32
 static struct interrupt_slot mvIntDrv_slots[MAX_INTERRUPTS];
+
+#define MAX_PCI_DEVS 8
+
+struct pci_dev *pci_devs_list[MAX_PCI_DEVS];
+
+int mvintdrv_add_pci_dev_to_ar(struct pci_dev *dev)
+{
+	int i;
+
+	down(&mvint_pci_devs_sem);
+	for (i=0; i<MAX_PCI_DEVS; i++) {
+				if (!pci_devs_list[i]) {
+						pci_devs_list[i] = dev;
+						up(&mvint_pci_devs_sem);
+						return 0;
+					}
+		}
+
+	up(&mvint_pci_devs_sem);
+	return -1;
+}
+
+/*
+	Get and remove the head (first non-NULL item) of the array
+*/
+struct pci_dev *mvintdrv_get_pci_dev_from_ar(void)
+{
+	int i;
+	struct pci_dev *dev;
+	
+	down(&mvint_pci_devs_sem);
+	for (i=0; i<MAX_PCI_DEVS; i++) {
+				if (pci_devs_list[i]) {
+						dev = pci_devs_list[i];
+						pci_devs_list[i] = NULL;
+						up(&mvint_pci_devs_sem);
+						return dev;
+					}
+		}
+
+	up(&mvint_pci_devs_sem);
+	return NULL;
+}
+
 
 int mvintdrv_register_isr_sema(struct semaphore *sema)
 {
@@ -274,7 +320,7 @@ static ssize_t mvIntDrv_write(struct file *f, const char *buf, size_t siz, loff_
 	if (pdev) {
 		int rc;
 		if (pci_dev_msi_enabled(pdev)) {
-			pci_dev_put(pdev);
+			/*pci_dev_put(pdev);*/
 			return 0;
 		}
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,9,0)
@@ -284,7 +330,10 @@ static ssize_t mvIntDrv_write(struct file *f, const char *buf, size_t siz, loff_
 #endif
 		printk("MSI interrupts for device %s %senabled\n",
 		       pdev->dev.kobj.name, (rc < 0) ? "not " : "");
-		pci_dev_put(pdev);
+		/*pci_dev_put(pdev);*/
+		if (mvintdrv_add_pci_dev_to_ar(pdev)) {
+			printk("%s: Cannot reg pdev %p!\n", __func__, pdev);
+			}
 		return rc;
 	}
 #else
@@ -302,13 +351,17 @@ static ssize_t mvIntDrv_write(struct file *f, const char *buf, size_t siz, loff_
 	if (pdev) {
 		int rc;
 		if (pci_dev_msi_enabled(pdev)) {
-			pci_dev_put(pdev);
+			/*pci_dev_put(pdev);*/
 			return 0;
 		}
 		rc = pci_enable_msi(pdev);
 		printk("MSI interrupts for device %s %senabled\n", pdev->dev.kobj.name,
 		       (rc < 0) ? "not " : "");
-		pci_dev_put(pdev);
+		/*pci_dev_put(pdev);*/
+		if (mvintdrv_add_pci_dev_to_ar(pdev)) {
+			printk("%s: Cannot reg pdev %p!\n", __func__, pdev);
+			}
+
 		return rc;
 	}
 #else
@@ -366,8 +419,25 @@ static int mvIntDrv_release(struct inode *inode, struct file *file)
 	mvIntDrvNumOpened--;
 	if (!mvIntDrvNumOpened) {
 		/* Cleanup */
-		int slot;
+		int i, slot;
 		struct interrupt_slot *sl;
+		struct pci_dev *pdev;
+		u16 control;
+		
+		for (i=0; i<MAX_PCI_DEVS; i++) {
+				pdev = mvintdrv_get_pci_dev_from_ar();
+				if (pdev) {
+						printk("%s: Disabling MSI for devfn %x vendor %x devid %x msi_cap %x msi_enabled\n",
+							__func__, pdev->devfn, pdev->vendor, pdev->device, pdev->msi_cap, pdev->msi_enabled);
+
+						pci_read_config_word(pdev, pdev->msi_cap + PCI_MSI_FLAGS, &control);
+						control &= ~PCI_MSI_FLAGS_ENABLE;
+						pci_write_config_word(pdev, pdev->msi_cap + PCI_MSI_FLAGS, control);
+
+						printk("%s: New MSI control reg value is: %x\n", __func__, control);
+						pci_dev_put(pdev);
+					}
+			}
 
 		for (slot = 0; slot < MAX_INTERRUPTS; slot++) {
 			sl = &(mvIntDrv_slots[slot]);
@@ -399,6 +469,14 @@ static void mvIntDrv_releaseDrv(void)
 {
 	/* Will be called whan all descriptors are closed */
 }
+
+static int mvIntDrv_PreInitDrv(void)
+{
+	sema_init(&mvint_pci_devs_sem, 1);
+	pr_info("%s: Init Semaphore\n", __func__);
+	return 0;
+}
+
 
 static void mvIntDrv_postInitDrv(void)
 {
