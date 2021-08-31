@@ -53,6 +53,7 @@ disclaimer.
 *       $Revision: 1 $
 *******************************************************************************/
 #define MV_DRV_NAME     "mvIntDrv"
+#define INT_DRV_VER		"1.02"
 #define MV_DRV_MAJOR    244
 #define MV_DRV_MINOR    4
 #define MV_DRV_FOPS     mvIntDrv_fops
@@ -319,8 +320,19 @@ static ssize_t mvIntDrv_write(struct file *f, const char *buf, size_t siz, loff_
 					   (unsigned)cmdBuf[3]));
 	if (pdev) {
 		int rc;
+
+		pr_info("%s: Got request to enable MSI for %x:%x:%x\n",
+				__func__, (((cmdBuf[2]<<8)&0xff00)|(cmdBuf[1]&0xff)),
+					   (unsigned)cmdBuf[3],
+					   PCI_DEVFN((unsigned)cmdBuf[4],
+						     (unsigned)cmdBuf[5]));
+
+		if (mvintdrv_add_pci_dev_to_ar(pdev)) {
+			printk("%s: Cannot reg pdev %p!\n", __func__, pdev);
+			} else pr_info("%s: Queueing pci device for driver cleanup MSI disablement...\n", __func__);
+
 		if (pci_dev_msi_enabled(pdev)) {
-			/*pci_dev_put(pdev);*/
+			pr_info("%s: PCIe MSI already enabled.\n", __func__);
 			return 0;
 		}
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,9,0)
@@ -330,10 +342,7 @@ static ssize_t mvIntDrv_write(struct file *f, const char *buf, size_t siz, loff_
 #endif
 		printk("MSI interrupts for device %s %senabled\n",
 		       pdev->dev.kobj.name, (rc < 0) ? "not " : "");
-		/*pci_dev_put(pdev);*/
-		if (mvintdrv_add_pci_dev_to_ar(pdev)) {
-			printk("%s: Cannot reg pdev %p!\n", __func__, pdev);
-			}
+
 		return rc;
 	}
 #else
@@ -350,17 +359,24 @@ static ssize_t mvIntDrv_write(struct file *f, const char *buf, size_t siz, loff_
 						     (unsigned)cmdBuf[5]));
 	if (pdev) {
 		int rc;
+
+		pr_info("%s: Got request to enable MSI for %x:%x:%x\n",
+				__func__, (((cmdBuf[2]<<8)&0xff00)|(cmdBuf[1]&0xff)),
+					   (unsigned)cmdBuf[3],
+					   PCI_DEVFN((unsigned)cmdBuf[4],
+						     (unsigned)cmdBuf[5]));
+
+		if (mvintdrv_add_pci_dev_to_ar(pdev)) {
+			printk("%s: Cannot reg pdev %p!\n", __func__, pdev);
+			} else pr_info("%s: Queueing pci device for driver cleanup MSI disablement...\n", __func__);
+
 		if (pci_dev_msi_enabled(pdev)) {
-			/*pci_dev_put(pdev);*/
+			pr_info("%s: PCIe MSI already enabled.\n", __func__);
 			return 0;
 		}
 		rc = pci_enable_msi(pdev);
 		printk("MSI interrupts for device %s %senabled\n", pdev->dev.kobj.name,
 		       (rc < 0) ? "not " : "");
-		/*pci_dev_put(pdev);*/
-		if (mvintdrv_add_pci_dev_to_ar(pdev)) {
-			printk("%s: Cannot reg pdev %p!\n", __func__, pdev);
-			}
 
 		return rc;
 	}
@@ -427,7 +443,7 @@ static int mvIntDrv_release(struct inode *inode, struct file *file)
 		for (i=0; i<MAX_PCI_DEVS; i++) {
 				pdev = mvintdrv_get_pci_dev_from_ar();
 				if (pdev) {
-						printk("%s: Disabling MSI for devfn %x vendor %x devid %x msi_cap %x msi_enabled\n",
+						printk("%s: Disabling MSI for devfn %x vendor %x devid %x msi_cap %x msi_enabled %d\n",
 							__func__, pdev->devfn, pdev->vendor, pdev->device, pdev->msi_cap, pdev->msi_enabled);
 
 						pci_read_config_word(pdev, pdev->msi_cap + PCI_MSI_FLAGS, &control);
@@ -435,7 +451,6 @@ static int mvIntDrv_release(struct inode *inode, struct file *file)
 						pci_write_config_word(pdev, pdev->msi_cap + PCI_MSI_FLAGS, control);
 
 						printk("%s: New MSI control reg value is: %x\n", __func__, control);
-						pci_dev_put(pdev);
 					}
 			}
 
@@ -473,7 +488,7 @@ static void mvIntDrv_releaseDrv(void)
 static int mvIntDrv_PreInitDrv(void)
 {
 	sema_init(&mvint_pci_devs_sem, 1);
-	pr_info("%s: Init Semaphore\n", __func__);
+	pr_info("%s: Version: %s\n", __func__, INT_DRV_VER);
 	return 0;
 }
 

@@ -74,7 +74,7 @@ disclaimer.
 *
 *******************************************************************************/
 #define MV_DRV_NAME     "mvDmaDrv"
-#define MV_DRV_NAME_VERSION "1.24"
+#define MV_DRV_NAME_VERSION "1.25"
 #define MV_DRV_MAJOR	244
 #define MV_DRV_MINOR	3
 #define MV_DRV_FOPS	mvDmaDrv_fops
@@ -100,10 +100,6 @@ disclaimer.
 #define MG_RX_SDMA_RES_ERR_MOD27 0x2878
 
 #define MG_UDA 0x200
-#define MG_CM3_TX_WIN 0x334
-#define MG_CM3_EXT_BASE_ADDR 0x480 /* Stride 0x10 n=0..5 */
-#define MG_CM3_EXT_WIN_CTRL 0x48C /* Stride 0x10 n=0..5 */
-#define MG_CM3_CPU_GLBL_CONF 0x500
 
 #define MG_INT_IRQ_CAUSE 0x38
 #define MG1_INT_IRQ_CAUSE1 0x144
@@ -205,8 +201,6 @@ disclaimer.
 static u8 platdrv_registered;
 static struct device *platdrv_dev;
 
-static volatile unsigned *ulptr_zero;
-
 struct dma_mapping {
 	void *virt;
 	dma_addr_t dma;
@@ -242,8 +236,6 @@ static noinline uint32_t mvDmaDrv_modulo(uint64_t num, uint64_t div) {
 
 static void mvDmaDrv_free_dma_block(struct dma_mapping *m)
 {
-	if ( (ulptr_zero) && (!(*ulptr_zero)) ) printk("%s: line %d ptr0=0!!!\n", __func__, __LINE__);
-
 	if (!m->dma)
 		return;
 
@@ -254,7 +246,6 @@ static void mvDmaDrv_free_dma_block(struct dma_mapping *m)
 	dma_free_coherent(m->dev ? m->dev : mvDrv_device, m->size, m->virt,
 			  m->dma);
 	
-	if ( (ulptr_zero) && (!(*ulptr_zero)) ) printk("%s: line %d ptr0=0!!!\n", __func__, __LINE__);
 }
 
 
@@ -264,8 +255,6 @@ static int mvDmaDrv_mmap(struct file *file, struct vm_area_struct *vma)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,11,0)
 	int (*dma_configure)(struct device *dev);
 	int ret;
-
-	if ( (ulptr_zero) && (!(*ulptr_zero)) ) printk("%s: line %d ptr0=0!!!\n", __func__, __LINE__);
 
 	/* Until LK 4.11, dma_alloc_coherent(NULL, ...) is allowed, and used in
 	   case of AC3 */
@@ -435,7 +424,6 @@ static int mvDmaDrv_mmap(struct file *file, struct vm_area_struct *vma)
 	}
 #endif /* MMAP_USE_REMAP_PFN_RANGE */
 
-	if ( (ulptr_zero) && (!(*ulptr_zero)) ) printk("%s: line %d ptr0=0!!!\n", __func__, __LINE__);
 	return 0;
 }
 
@@ -443,8 +431,6 @@ static ssize_t mvDmaDrv_read(struct file *f, char *buf, size_t siz, loff_t *off)
 {
 	struct dma_mapping *m = (struct dma_mapping *)f->private_data;
 	unsigned long long dma;
-
-	if ( (ulptr_zero) && (!(*ulptr_zero)) ) printk("%s: line %d ptr0=0!!!\n", __func__, __LINE__);
 
 	if (!m)
 		return -EFAULT;
@@ -456,8 +442,6 @@ static ssize_t mvDmaDrv_read(struct file *f, char *buf, size_t siz, loff_t *off)
 
 	if (copy_to_user(buf, &dma, sizeof(dma)))
 		return -EFAULT;
-
-	if ( (ulptr_zero) && (!(*ulptr_zero)) ) printk("%s: line %d ptr0=0!!!\n", __func__, __LINE__);
 
 	return sizeof(dma);
 }
@@ -484,7 +468,6 @@ static void mvdma_free_memory_func(struct work_struct *work)
 	u32 val;
 	int i, ii;
 
-	if ( (ulptr_zero) && (!(*ulptr_zero)) ) printk("%s: line %d ptr0=0!!!\n", __func__, __LINE__);
 	pr_info("%s: start\n", __func__);
 
 	m = container_of(to_delayed_work(work), struct dma_mapping, free_mem_delayed);
@@ -517,8 +500,6 @@ static void mvdma_free_memory_func(struct work_struct *work)
 				   }
 			}
 
-	if ( (ulptr_zero) && (!(*ulptr_zero)) ) printk("%s: line %d ptr0=0!!!\n", __func__, __LINE__);
-		
 	if (m != shared_dmaBlock) {
 		pr_info("%s: Freeing DMA memory...\n", __func__);
 		mvDmaDrv_FreeDummys(m);
@@ -526,19 +507,14 @@ static void mvdma_free_memory_func(struct work_struct *work)
 		kfree(m);
 	}
 
-	if ( (ulptr_zero) && (!(*ulptr_zero)) ) printk("%s: line %d ptr0=0!!!\n", __func__, __LINE__);
-	
 	pr_info("%s: %s Driver freed to serve new request...\n", MV_DRV_NAME, __func__);
 	up(&mvdma_sem);
-
-	if ( (ulptr_zero) && (!(*ulptr_zero)) ) printk("%s: line %d ptr0=0!!!\n", __func__, __LINE__);
 }
 
 static int mvDmaDrv_open(struct inode *inode, struct file *file)
 {
 	struct dma_mapping *m;
 
-	if ( (ulptr_zero) && (!(*ulptr_zero)) ) printk("%s: line %d ptr0=0!!!\n", __func__, __LINE__);
 	down(&mvdma_sem);
 	printk("%s: %s Driver allocating to serve new request...\n", MV_DRV_NAME, __func__);
 
@@ -551,8 +527,6 @@ static int mvDmaDrv_open(struct inode *inode, struct file *file)
 
 	printk("%s: %s(file=%p) data=%p\n", MV_DRV_NAME, __func__, file, m);
 
-	if ( (ulptr_zero) && (!(*ulptr_zero)) ) printk("%s: line %d ptr0=0!!!\n", __func__, __LINE__);
-	
 	return 0;
 }
 
@@ -560,8 +534,6 @@ static int mvDmaDrv_PollIRQStats(void __iomem *base)
 {
  u32 val;
  
- if ( (ulptr_zero) && (!(*ulptr_zero)) ) printk("%s: line %d ptr0=0!!!\n", __func__, __LINE__);
-
 	/* Clear on Read registers: */
  val = readl(base + MG_RX_SDMA_INT_CAUSE0);
  pr_info("%s: reg %x = %x\n", __func__, MG_RX_SDMA_INT_CAUSE0, val);
@@ -611,8 +583,6 @@ static int mvDmaDrv_PollIRQStats(void __iomem *base)
  val = readl(base + MG_CM3_SRAM_OOR_ADDR );
  pr_info("%s: reg %x = %x\n",  __func__, MG_CM3_SRAM_OOR_ADDR , val);
 
- if ( (ulptr_zero) && (!(*ulptr_zero)) ) printk("%s: line %d ptr0=0!!!\n", __func__, __LINE__);
- 
  return 0;
 }
 
@@ -625,8 +595,6 @@ static loff_t mvDmaDrv_lseek(struct file *file, loff_t off, int unused)
 	unsigned int bus = (off >> 8) & 0xff;
 	unsigned int devfn = PCI_DEVFN(((off >> 3) & 0x1f), (off & 0x07));
 
-	if ( (ulptr_zero) && (!(*ulptr_zero)) ) printk("%s: line %d ptr0=0!!!\n", __func__, __LINE__);
-	
 	if (!m)
 		return -EFAULT;
 
@@ -643,8 +611,6 @@ static loff_t mvDmaDrv_lseek(struct file *file, loff_t off, int unused)
 		
 	}
 
-	if ( (ulptr_zero) && (!(*ulptr_zero)) ) printk("%s: line %d ptr0=0!!!\n", __func__, __LINE__);
-	
 	return 0;
 }
 
@@ -652,8 +618,6 @@ static int mvDmaDrv_do_CPSS_skip_sequence_pcie(void __iomem *base)
 {
 	u32 val;
 
-	if ( (ulptr_zero) && (!(*ulptr_zero)) ) printk("%s: line %d ptr0=0!!!\n", __func__, __LINE__);
-	
 	val = readl(base + DFX_SKIP_REG_INIT_MATRIX_REG);
 	val |= SKIP_INIT_SOFT_RST_BIT;
 	writel(val, base + DFX_SKIP_REG_INIT_MATRIX_REG);
@@ -695,8 +659,6 @@ static int mvDmaDrv_do_CPSS_skip_sequence_pcie(void __iomem *base)
 	val = readl(base + DFX_SKIP_IHB_INIT_MATRIX_REG);
 	val &= ~SKIP_INIT_SOFT_RST_BIT;
 	writel(val, base + DFX_SKIP_IHB_INIT_MATRIX_REG);
-
-	if ( (ulptr_zero) && (!(*ulptr_zero)) ) printk("%s: line %d ptr0=0!!!\n", __func__, __LINE__);
 
 	return 0;
 }
@@ -902,8 +864,6 @@ static int mvDmaDrv_release(struct inode *inode, struct file *file)
 	struct dma_mapping *m = (struct dma_mapping *)file->private_data;
 	int ret;
 
-	if ( (ulptr_zero) && (!(*ulptr_zero)) ) printk("%s: line %d ptr0=0!!!\n", __func__, __LINE__);
-
 	printk("%s: %s(file=%p) data=%p\n", MV_DRV_NAME, __func__, file, m);
 	ret = mvDmaDrv_stopAndReset_AC3X_Aldrin_PP(m);
 
@@ -911,8 +871,6 @@ static int mvDmaDrv_release(struct inode *inode, struct file *file)
 			MV_DRV_NAME, __func__, ret);
 	printk("%s: delaying DMA memory free by %d second...\n", __func__, SECS_DELAY_WQ);
 	schedule_delayed_work(&m->free_mem_delayed, msecs_to_jiffies(1000*SECS_DELAY_WQ));
-
-	if ( (ulptr_zero) && (!(*ulptr_zero)) ) printk("%s: line %d ptr0=0!!!\n", __func__, __LINE__);
 
 	return ret;
 }
@@ -979,7 +937,6 @@ static int mvDmaDrv_PreInitDrv(void)
 {
 	sema_init(&mvdma_sem, 1);
 	printk("%s: %s version %s\n", __func__, MV_DRV_NAME, MV_DRV_NAME_VERSION);
-	ulptr_zero = (unsigned *)phys_to_virt(0);
 
 	return 0;
 }
