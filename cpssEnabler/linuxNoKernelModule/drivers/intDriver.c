@@ -445,7 +445,11 @@ static int mvIntDrv_release(struct inode *inode, struct file *file)
 				if (pdev) {
 						printk("%s: Disabling MSI for devfn %x vendor %x devid %x msi_cap %x msi_enabled %d\n",
 							__func__, pdev->devfn, pdev->vendor, pdev->device, pdev->msi_cap, pdev->msi_enabled);
-
+/*
+ * 						Need to disable MSI before releasing the interrupts, as currently
+ * 												the Kernel will only write the MSI address with zero WITHOUT
+ * 																		disabling MSI, causing memory overrun of physical address zero in ARM 32-bit:
+ * 																		*/
 						pci_read_config_word(pdev, pdev->msi_cap + PCI_MSI_FLAGS, &control);
 						control &= ~PCI_MSI_FLAGS_ENABLE;
 						pci_write_config_word(pdev, pdev->msi_cap + PCI_MSI_FLAGS, control);
