@@ -446,21 +446,6 @@ static ssize_t mvDmaDrv_read(struct file *f, char *buf, size_t siz, loff_t *off)
 	return sizeof(dma);
 }
 
-static int mvDmaDrv_FreeDummys(struct dma_mapping *m)
-{
-	int i;
-
-/*	for (i=0; i<16; i++) {
-		dma_free_coherent(m->dev ? m->dev : mvDrv_device, 0x10000 , m->virt_dummy[i],
-			  m->dma_dummy[i]);
-			m->virt_dummy[i] = NULL;
-			m->dma_dummy[i] = 0;
-			m->phys_dummy[i] = 0;
-		}
-*/
-	return 0;
-}
-
 static void mvdma_free_memory_func(struct work_struct *work)
 {
 	struct dma_mapping *m;
@@ -474,35 +459,30 @@ static void mvdma_free_memory_func(struct work_struct *work)
 	if (!m->dev) {
 	   pr_info("%s: No PCI device assigned!\n", __func__);
 	   }
-		else	{
-					for (i=0; i<2; i++) {
+		else {
+			for (i=0; i<2; i++) {
 						
-						pdev = m->pdevs_list[i];
+				pdev = m->pdevs_list[i];
 
-						if (!pdev) {
-							continue;
-							}
+				if (!pdev) {
+					continue;
+				}
 
-						/* PCIe bars in AC3X / Aldrin are 0,2,4 */
-						for (ii=0; ii<6; ii+=2) {
-							if (!m->base[i][ii]) {
-								continue;
-								}
+				/* PCIe bars in AC3X / Aldrin are 0,2,4 */
+				for (ii=0; ii<6; ii+=2) {
+					if (!m->base[i][ii]) {
+						continue;
+						}
+					pr_info("%s: Unmapping PCI bar %d...\n", __func__, i);
+					pcim_iounmap(pdev, m->base[i][ii]);
 
-		/*					val = readl(m->base[i] + MG_RX_SDMA_Q_CMD_REG);
-							pr_info("%s: device %d SDMA RX Q CMD val read is 0x%x\n",__func__, i, val); */
-
-							pr_info("%s: Unmapping PCI bar %d...\n", __func__, i);
-							pcim_iounmap(pdev, m->base[i][ii]);
-
-							}
+				}
 						
-				   }
-			}
+			   }
+		     }
 
 	if (m != shared_dmaBlock) {
 		pr_info("%s: Freeing DMA memory...\n", __func__);
-		mvDmaDrv_FreeDummys(m);
 		mvDmaDrv_free_dma_block(m);
 		kfree(m);
 	}
@@ -705,8 +685,6 @@ static int mvDmaDrv_stopAndReset_AC3X_Aldrin_PP(struct dma_mapping *m)
                 m->base[i][2] = pcim_iomap(pdev, 2, 64*1024*1024); /* switching registers/MG 64M AC3X/BC2/Aldrin only*/
 
                if (m->base[i][2]) {
-						/*pr_info("IRQ stats for device %d .\n",i);
-						mvDmaDrv_PollIRQStats(m->base[i][2]);*/
                        /* 
                         * Write Receive SDMA Queue Command Register in MG with stop all RX queues Values
                         * This will disable all of the SDMA RX reception.
@@ -725,8 +703,6 @@ static int mvDmaDrv_stopAndReset_AC3X_Aldrin_PP(struct dma_mapping *m)
 						for (ii=0; ii<6; ii++)
 							writel(RX_SDMA_ERR_MOD, m->base[i][2] + MG_RX_SDMA_RES_ERR_MOD27 + (0x4 * ii));
 						 
-						 /*sdma_rx_q_cmd_val_before[i] = readl(m->base[i][2] + MG_RX_SDMA_Q_CMD_REG);*/
-							
 						 /* Stop SDMA RX - prevent writing on memory which will be released to kernel */
 						writel(STOP_ALL_Q_BITS, m->base[i][2] + MG_RX_SDMA_Q_CMD_REG);
 						
@@ -734,9 +710,6 @@ static int mvDmaDrv_stopAndReset_AC3X_Aldrin_PP(struct dma_mapping *m)
 			   		   writel(STOP_ALL_Q_BITS, m->base[i][2] + MG_TX_SDMA_Q_CMD_REG);
 						
 						/* Stop FDB AU messages to CPU (FDB unit) */
-					   /*val = readl(m->base[i][2] + FDB_GLOBAL_CONF_REG);
-					   val |= AUMessageToCPUStop_BIT;
-					   writel(val, m->base[i][2] + FDB_GLOBAL_CONF_REG);*/
 
 						/* Stop AU messages on MG (DMA) */
 					   writel(STOP_AU_Q_BIT, m->base[i][2] + MG_AU_Q_HOST_CONF_REG);
@@ -763,9 +736,6 @@ static int mvDmaDrv_stopAndReset_AC3X_Aldrin_PP(struct dma_mapping *m)
 		   		
 				if (m->base[i][0]) {
 					
-					/*pcie_conf_hdr[i] = readl(m->base[i][0] + CNM_PCIE_CONF_HDR_REG);*/
-					
-					
 					/* Disable PCIe bus mastering from AC3X/Aldrin to CPU/SOC: */
 					
 					val = readl(m->base[i][0] + CNM_PCIE_CMD_STAT_REG);
@@ -783,11 +753,6 @@ static int mvDmaDrv_stopAndReset_AC3X_Aldrin_PP(struct dma_mapping *m)
 					
 					if (m->base[i][4]) {
 						/* Set Skip PCIe reset when doing MG soft reset sequence: */
-						/*val = readl(m->base[i][4] + DFX_PCIE_SKIP_INIT_MATRIX_REG);*/
-						/*val &= ~PCIE_SKIP_INIT_SOFT_RST_BIT;*/
-						/*skip_pcie_reg[i] = val;
-						writel(val, m->base[i][4] + DFX_PCIE_SKIP_INIT_MATRIX_REG);*/
-
 						/* Finally, soft reset Packet Processor: */
  			          /*
 			                Behavior is un-predictable (probably the device will hang)
@@ -828,32 +793,11 @@ static int mvDmaDrv_stopAndReset_AC3X_Aldrin_PP(struct dma_mapping *m)
 	 
  	for (i=0; i<2; i++) {
 		pr_info("%s: Stopped DMA on PCI device %x:%x:%x.%x\n", __func__, domain, bus + i, (unsigned)((off >> 3) & 0x1f), (unsigned)(off & 0x07));
-		/*printk("%s: device %d: wrote %x to DFX PCIe skip configuration register %x\n", 
-				__func__, i, skip_pcie_reg[i], DFX_PCIE_SKIP_INIT_MATRIX_REG);*/
-		/*printk("%s: device %d: Read %x from PCIe configuration register %x\n", 
-				__func__, i, pcie_conf_hdr[i], CNM_PCIE_CONF_HDR_REG);*/
 		if (reset_done)
 		   printk("%s: device %d: Wrote %x to DFX rst reg %x reset_cnt %d\n", 
 				   __func__, i, dfx_rst_reg[i], DFX_RST_CTRL_REG, reset_done);
 
  		}
-  	/*	if (m->base[i]) {
-               pr_info("%s: Stopped DMA on PCI device %x:%x:%x.%x\n", __func__, domain, bus + i, (unsigned)((off >> 3) & 0x1f), (unsigned)(off & 0x07)); 
-
-				did = readl(m->base[i] + MG_DEVID_REG);
-				vid = readl(m->base[i] + MG_VENDID_REG);
-				pr_info("%s: did:vid %x:%x\n", __func__, did, vid);
-	
-				 val = readl(m->base[i] + MG_UEA_REG);
-				pr_info("%s: UEA value is: %x\n", __func__, val);  Unit Error Address (UEA) Register 
-
-				 Finally, take SDMA out of reset: 
-				val = readl(m->base[i] + MG_EXT_GLOBAL_CNTRL_REG);
-				val &= (~SDMA_SW_RST_BIT);
-				writel(val, m->base[i] + MG_EXT_GLOBAL_CNTRL_REG);
-	
-  			}
-  	}*/
 
 	return err;
 
