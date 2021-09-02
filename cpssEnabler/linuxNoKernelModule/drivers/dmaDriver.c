@@ -74,7 +74,7 @@ disclaimer.
 *
 *******************************************************************************/
 #define MV_DRV_NAME     "mvDmaDrv"
-#define MV_DRV_NAME_VERSION "1.25"
+#define MV_DRV_NAME_VERSION "1.28"
 #define MV_DRV_MAJOR	244
 #define MV_DRV_MINOR	3
 #define MV_DRV_FOPS	mvDmaDrv_fops
@@ -89,6 +89,7 @@ disclaimer.
 #define MG_DEVID_REG 0x4C
 #define MG_VENDID_REG 0x50
 #define MG_EXT_GLOBAL_CNTRL_REG 0x5C
+#define MG_SCRATCHPAD_REG 0x7C
 #define MG_AU_Q_HOST_CONF_REG 0xD8
 
 #define MG_UEA_REG 0x208
@@ -159,7 +160,7 @@ disclaimer.
 
 #define DFX_SOFT_RST_BITS (MG_SOFT_RST_TRIGGER_BIT | TABLE_START_INIT_BIT)
 
-#define SECS_DELAY_WQ 10
+#define SECS_DELAY_WQ 1
 
 #include "mvDriverTemplate.h"
 
@@ -446,70 +447,6 @@ static ssize_t mvDmaDrv_read(struct file *f, char *buf, size_t siz, loff_t *off)
 	return sizeof(dma);
 }
 
-static void mvdma_free_memory_func(struct work_struct *work)
-{
-	struct dma_mapping *m;
-	struct pci_dev *pdev;
-	u32 val;
-	int i, ii;
-
-	pr_info("%s: start\n", __func__);
-
-	m = container_of(to_delayed_work(work), struct dma_mapping, free_mem_delayed);
-	if (!m->dev) {
-	   pr_info("%s: No PCI device assigned!\n", __func__);
-	   }
-		else {
-			for (i=0; i<2; i++) {
-						
-				pdev = m->pdevs_list[i];
-
-				if (!pdev) {
-					continue;
-				}
-
-				/* PCIe bars in AC3X / Aldrin are 0,2,4 */
-				for (ii=0; ii<6; ii+=2) {
-					if (!m->base[i][ii]) {
-						continue;
-						}
-					pr_info("%s: Unmapping PCI bar %d...\n", __func__, i);
-					pcim_iounmap(pdev, m->base[i][ii]);
-
-				}
-						
-			   }
-		     }
-
-	if (m != shared_dmaBlock) {
-		pr_info("%s: Freeing DMA memory...\n", __func__);
-		mvDmaDrv_free_dma_block(m);
-		kfree(m);
-	}
-
-	pr_info("%s: %s Driver freed to serve new request...\n", MV_DRV_NAME, __func__);
-	up(&mvdma_sem);
-}
-
-static int mvDmaDrv_open(struct inode *inode, struct file *file)
-{
-	struct dma_mapping *m;
-
-	down(&mvdma_sem);
-	printk("%s: %s Driver allocating to serve new request...\n", MV_DRV_NAME, __func__);
-
-	m = kzalloc(sizeof(struct dma_mapping), GFP_KERNEL);
-	if (!m)
-		return -ENOMEM;
-
-	INIT_DELAYED_WORK(&m->free_mem_delayed, mvdma_free_memory_func);
-	file->private_data = m;
-
-	printk("%s: %s(file=%p) data=%p\n", MV_DRV_NAME, __func__, file, m);
-
-	return 0;
-}
-
 static int mvDmaDrv_PollIRQStats(void __iomem *base)
 {
  u32 val;
@@ -566,34 +503,6 @@ static int mvDmaDrv_PollIRQStats(void __iomem *base)
  return 0;
 }
 
-
-static loff_t mvDmaDrv_lseek(struct file *file, loff_t off, int unused)
-{
-	struct dma_mapping *m = (struct dma_mapping *)file->private_data;
-	struct pci_dev *pdev;
-	int domain = (off >> 16) & 0xffff;
-	unsigned int bus = (off >> 8) & 0xff;
-	unsigned int devfn = PCI_DEVFN(((off >> 3) & 0x1f), (off & 0x07));
-
-	if (!m)
-		return -EFAULT;
-
-	if (platdrv_dev) /* device-tree reservation */
-		return 0;
-
-	m->pci_offset = off;
-	pdev = pci_get_domain_bus_and_slot(domain, bus, devfn);
-	if (pdev) {
-		m->pdev = pdev;
-		m->dev = &(pdev->dev);
-		printk("%s: Using PCI device %s\n", MV_DRV_NAME,
-		       m->dev->kobj.name);
-		
-	}
-
-	return 0;
-}
-
 static int mvDmaDrv_do_CPSS_skip_sequence_pcie(void __iomem *base)
 {
 	u32 val;
@@ -643,16 +552,16 @@ static int mvDmaDrv_do_CPSS_skip_sequence_pcie(void __iomem *base)
 	return 0;
 }
 
-static int mvDmaDrv_stopAndReset_AC3X_Aldrin_PP(struct dma_mapping *m)
+static int mvDmaDrv_stopAndResetSDMA_AC3X_Aldrin_PP(struct dma_mapping *m)
 {
  struct pci_dev *pdev;
  int err, i, ii;
- u32 val, did, vid, sdma_rx_q_cmd_val_before[2], pcie_conf_hdr[2], dfx_rst_reg[2], skip_pcie_reg[2];
+ u16 cmd16;
+ u32 val;
  loff_t off;
  int domain;
  unsigned int bus;
  unsigned int devfn;
- int reset_done = 0;
 
  if (!m->dev) {
 	pr_info("%s: No PCI device assigned!\n", __func__);
@@ -731,60 +640,9 @@ static int mvDmaDrv_stopAndReset_AC3X_Aldrin_PP(struct dma_mapping *m)
                }
 	       else pr_info("%s: base %d BAR2 not mappable!\n", __func__, i);
 
-				
-				m->base[i][0] = pcim_iomap(pdev, 0, 1*1024*1024); /* CnM / external interfaces registers 1M AC3X/BC2/Aldrin only*/
-		   		
-				if (m->base[i][0]) {
-					
-					/* Disable PCIe bus mastering from AC3X/Aldrin to CPU/SOC: */
-					
-					val = readl(m->base[i][0] + CNM_PCIE_CMD_STAT_REG);
-					
-					val &= ~PCIE_MASTER_BIT;
-					
-					writel(val, m->base[i][0] + CNM_PCIE_CMD_STAT_REG);
-					
-					} 
-					else pr_info("%s: base %d BAR0 not mappable!\n", __func__, i);
-
-					
-					m->base[i][4] = pcim_iomap(pdev, 4, 8*1024*1024); /* DFX 8M AC3X/BC2/Aldrin only*/
-					
-					
-					if (m->base[i][4]) {
-						/* Set Skip PCIe reset when doing MG soft reset sequence: */
-						/* Finally, soft reset Packet Processor: */
- 			          /*
-			                Behavior is un-predictable (probably the device will hang)
-			                if CPU try to read/write registers/tables
-			                of the device during the time of soft reset
-			                (Soft reset is active for 2000 core clock cycles (6uS). Waiting 20uS should be enough)
-			                Event when '<PEX Skip Init if MG Soft Reset> = SKIP INIT ON'
-			                (no pex reset).
-			                *******************************
-			                meaning that even when skip pex reset there is still interval of
-			                time that the CPU must not approach the device.
-			            */
-			            
-			            mvDmaDrv_do_CPSS_skip_sequence_pcie(m->base[i][4]);
-						
-						val = readl(m->base[i][4] + DFX_RST_CTRL_REG);
-						
-						val &= ~DFX_SOFT_RST_BITS;
-						
-						dfx_rst_reg[i] = val;
-						
-						mb(); /* Synchronize CPU to finish all writes to PP address space in order to ensure no writes to PP will happen */
-						
-						writel(val, m->base[i][4] + DFX_RST_CTRL_REG);
-						
-						mb();
-						
-						reset_done++;
-						
-						} 
-						else pr_info("%s: base %d BAR4 not mappable!\n", __func__, i);
-					
+				pci_read_config_word(pdev, PCI_COMMAND, &cmd16);
+				cmd16 = cmd16 & ~PCI_COMMAND_MASTER;
+				pci_write_config_word(pdev, PCI_COMMAND, cmd16);
         }
 	else pr_info("%s: unable to iomap %d. err %d!", __func__, i, err);
  	}
@@ -793,15 +651,198 @@ static int mvDmaDrv_stopAndReset_AC3X_Aldrin_PP(struct dma_mapping *m)
 	 
  	for (i=0; i<2; i++) {
 		pr_info("%s: Stopped DMA on PCI device %x:%x:%x.%x\n", __func__, domain, bus + i, (unsigned)((off >> 3) & 0x1f), (unsigned)(off & 0x07));
-		if (reset_done)
-		   printk("%s: device %d: Wrote %x to DFX rst reg %x reset_cnt %d\n", 
-				   __func__, i, dfx_rst_reg[i], DFX_RST_CTRL_REG, reset_done);
-
  		}
 
 	return err;
 
 }
+
+
+static int mvDmaDrv_DoReset(struct dma_mapping *m, int conditional_reset)
+{
+	int i, err;
+	loff_t off;
+	int domain;
+	unsigned int bus;
+	unsigned int devfn;
+	u32 val; struct pci_dev *pdev;
+
+	synchronize_rcu();
+	
+	for (i=0; i<2; i++) {
+		off = m->pci_offset;
+		domain = (off >> 16) & 0xffff;
+		bus = (off >> 8) & 0xff;
+		devfn = PCI_DEVFN(((off >> 3) & 0x1f), (off & 0x07));
+	
+		pdev = pci_get_domain_bus_and_slot(domain, bus + i, devfn);
+	
+		if (!pdev) {
+		   pr_info("%s: Failed to get PCI device %x:%x:%x.%x\n", __func__, domain, bus + i, (unsigned)((off >> 3) & 0x1f), (unsigned)(off & 0x07));
+		   continue;
+		   }
+
+		if (!pdev) {
+		   pr_info("%s: Failed to get PCI device %x:%x:%x.%x\n", __func__, domain, bus + i, (unsigned)((off >> 3) & 0x1f), (unsigned)(off & 0x07));
+		   continue;
+		   }
+		
+		m->pdevs_list[i] = pdev;
+		err = pcim_enable_device(pdev);
+		
+		if (err) {
+		   pr_info("%s: pcim enable device failed err %d!\n",__func__,err);
+		   return err;
+		}
+
+
+        if (conditional_reset) {
+							/* Only Reset Packet Processor if it was not previously reset: */
+                	if (!m->base[i][2])
+						m->base[i][2] = pcim_iomap(pdev, 2, 64*1024*1024); /* switching registers/MG 64M AC3X/BC2/Aldrin only*/
+
+               		if (m->base[i][2]) {
+						/* Read Scratchpad register to see if PP was already reset */
+						val = readl(m->base[i][2] + MG_SCRATCHPAD_REG);
+						
+						/* if Scratchpad is zero, PP was reset. Do not reset it again. */
+						if (!val)
+							continue;
+               		}
+        }
+
+		m->base[i][4] = pcim_iomap(pdev, 4, 8*1024*1024); /* DFX 8M AC3X/BC2/Aldrin only*/
+	
+		if (m->base[i][4]) {
+			/* Set Skip PCIe reset when doing MG soft reset sequence: */
+		
+			/* Finally, soft reset Packet Processor: */
+		    /*
+				Behavior is un-predictable (probably the device will hang)
+				if CPU try to read/write registers/tables
+				of the device during the time of soft reset
+				(Soft reset is active for 2000 core clock cycles (6uS). Waiting 20uS should be enough)
+				Event when '<PEX Skip Init if MG Soft Reset> = SKIP INIT ON'
+				(no pex reset).
+				*******************************
+				meaning that even when skip pex reset there is still interval of
+				time that the CPU must not approach the device.
+			*/
+
+			pr_info("%s: Preparing PP #%d for reset\n", __func__, i);
+			mvDmaDrv_do_CPSS_skip_sequence_pcie(m->base[i][4]);
+			
+			val = readl(m->base[i][4] + DFX_RST_CTRL_REG);
+			pr_info("%s: PP #%d sending reset\n", __func__, i);
+			val &= ~DFX_SOFT_RST_BITS;
+			
+			mb(); /* Synchronize CPU to finish all writes to PP address space in order to ensure no writes to PP will happen */
+			
+			writel(val, m->base[i][4] + DFX_RST_CTRL_REG);
+			
+			mb();
+			
+			pr_info("%s: PP #%d was reset\n", __func__, i);
+			} 
+			else pr_info("%s: base %d BAR4 not mappable!\n", __func__, i);
+		}
+
+	synchronize_rcu();
+	return 0;
+}
+
+static void mvdma_free_memory_func(struct work_struct *work)
+{
+	struct dma_mapping *m;
+	struct pci_dev *pdev;
+	u32 val;
+	int i, ii;
+
+	pr_info("%s: start\n", __func__);
+
+	m = container_of(to_delayed_work(work), struct dma_mapping, free_mem_delayed);
+	if (!m->dev) {
+	   pr_info("%s: No PCI device assigned!\n", __func__);
+	   }
+		else	{
+					mvDmaDrv_DoReset(m, false);
+					for (i=0; i<2; i++) {
+						
+						pdev = m->pdevs_list[i];
+
+						if (!pdev) {
+							continue;
+							}
+
+						/* PCIe bars in AC3X / Aldrin are 0,2,4 */
+						for (ii=0; ii<6; ii+=2) {
+							if (!m->base[i][ii]) {
+								continue;
+								}
+
+							pr_info("%s: Unmapping PCI bar %d...\n", __func__, i);
+							pcim_iounmap(pdev, m->base[i][ii]);
+
+							}
+						
+				   }
+			}
+
+	if (m != shared_dmaBlock) {
+		pr_info("%s: Freeing DMA memory...\n", __func__);
+		mvDmaDrv_free_dma_block(m);
+		kfree(m);
+	}
+
+	pr_info("%s: %s Driver freed to serve new request...\n", MV_DRV_NAME, __func__);
+	up(&mvdma_sem);
+}
+
+static int mvDmaDrv_open(struct inode *inode, struct file *file)
+{
+	struct dma_mapping *m;
+
+	down(&mvdma_sem);
+	printk("%s: %s Driver allocating to serve new request...\n", MV_DRV_NAME, __func__);
+
+	m = kzalloc(sizeof(struct dma_mapping), GFP_KERNEL);
+	if (!m)
+		return -ENOMEM;
+
+	INIT_DELAYED_WORK(&m->free_mem_delayed, mvdma_free_memory_func);
+	file->private_data = m;
+
+	printk("%s: %s(file=%p) data=%p\n", MV_DRV_NAME, __func__, file, m);
+
+	return 0;
+}
+
+static loff_t mvDmaDrv_lseek(struct file *file, loff_t off, int unused)
+{
+	struct dma_mapping *m = (struct dma_mapping *)file->private_data;
+	struct pci_dev *pdev;
+	int domain = (off >> 16) & 0xffff;
+	unsigned int bus = (off >> 8) & 0xff;
+	unsigned int devfn = PCI_DEVFN(((off >> 3) & 0x1f), (off & 0x07));
+
+	if (!m)
+		return -EFAULT;
+
+	if (platdrv_dev) /* device-tree reservation */
+		return 0;
+
+	m->pci_offset = off;
+	pdev = pci_get_domain_bus_and_slot(domain, bus, devfn);
+	if (pdev) {
+		m->pdev = pdev;
+		m->dev = &(pdev->dev);
+		printk("%s: Using PCI device %s\n", MV_DRV_NAME,
+		       m->dev->kobj.name);
+	}
+
+	return 0;
+}
+
 
 static int mvDmaDrv_release(struct inode *inode, struct file *file)
 {
@@ -809,7 +850,7 @@ static int mvDmaDrv_release(struct inode *inode, struct file *file)
 	int ret;
 
 	printk("%s: %s(file=%p) data=%p\n", MV_DRV_NAME, __func__, file, m);
-	ret = mvDmaDrv_stopAndReset_AC3X_Aldrin_PP(m);
+	ret = mvDmaDrv_stopAndResetSDMA_AC3X_Aldrin_PP(m);
 
 	printk("%s: %s: return value of stop and reset PP SDMA RX is: %d\n", 
 			MV_DRV_NAME, __func__, ret);
