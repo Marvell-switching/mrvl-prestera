@@ -53,13 +53,15 @@ disclaimer.
 *       $Revision: 1 $
 *******************************************************************************/
 #define MV_DRV_NAME     "mvIntDrv"
-#define INT_DRV_VER		"1.16"
+#define INT_DRV_VER		"1.17"
 #define MV_DRV_MAJOR    244
 #define MV_DRV_MINOR    4
 #define MV_DRV_FOPS     mvIntDrv_fops
 #define MV_DRV_PREINIT  mvIntDrv_PreInitDrv
 #define MV_DRV_POSTINIT mvIntDrv_postInitDrv
 #define MV_DRV_RELEASE  mvIntDrv_releaseDrv
+#define DEBUG
+
 #include "mvDriverTemplate.h"
 
 #include <linux/pci.h>
@@ -100,7 +102,7 @@ void enable_irq_wrapper(unsigned int irq)
 		goto out;
 
 	if (!desc->depth) {
-			pr_err("%s: irq desc depth is zero!!!\n");
+			pr_err("%s: irq desc depth is zero\n");
 			__sync_bool_compare_and_swap(&desc->depth, 0, 1);
 		}
 	
@@ -455,19 +457,19 @@ static ssize_t mvIntDrv_write(struct file *f, const char *buf, size_t siz, loff_
 	if (pdev) {
 		int rc;
 
-		pr_info("%s: Got request to enable MSI for %x:%x:%x\n",
+		pr_debug("%s: Got request to enable MSI for %x:%x:%x\n",
 				__func__, 0, (unsigned)cmdBuf[1],
-					   PCI_DEVFN((unsigned)cmdBuf[2],
-					   (unsigned)cmdBuf[3]));
+				PCI_DEVFN((unsigned)cmdBuf[2],
+				(unsigned)cmdBuf[3]));
 
 		if (mvintdrv_add_pci_dev_to_ar(pdev)) {
-			printk("%s: Cannot reg pdev %p!\n", __func__, pdev);
-			} else pr_info("%s: Queueing pci device for driver cleanup MSI disablement...\n", __func__);
+			pr_err("%s: Cannot reg pdev %p\n", __func__, pdev);
+			} else pr_debug("%s: Queueing pci device for driver cleanup MSI disablement...\n", __func__);
 
 		prt_msi_state("write before msi chk enable", 1, 0 ,0);
 		prt_msi_state("write before msi chk enable", 2, 0 ,0);
 		if (pci_dev_msi_enabled(pdev)) {
-			pr_info("%s: PCIe MSI already enabled.\n", __func__);
+			pr_warn("%s: PCIe MSI already enabled.\n", __func__);
 			prt_msi_state("write after msi enable already", 1, 0 ,0);
 			prt_msi_state("write after msi enable already", 2, 0 ,0);
 			pci_read_config_dword(pdev, pdev->msi_cap + PCI_MSI_ADDRESS_LO,
@@ -487,7 +489,7 @@ static ssize_t mvIntDrv_write(struct file *f, const char *buf, size_t siz, loff_
 		prt_msi_state("write after msi enable", 1, 0 ,0);
 		prt_msi_state("write after msi enable", 2, 0 ,0);
 
-		printk("MSI interrupts for device %s %senabled\n",
+		pr_info("MSI interrupts for device %s %senabled\n",
 		       pdev->dev.kobj.name, (rc < 0) ? "not " : "");
 
 		return rc;
@@ -507,21 +509,21 @@ static ssize_t mvIntDrv_write(struct file *f, const char *buf, size_t siz, loff_
 	if (pdev) {
 		int rc;
 
-		pr_info("%s: Got request to enable MSI for %x:%x:%x\n",
+		pr_debug("%s: Got request to enable MSI for %x:%x:%x\n",
 				__func__, (((cmdBuf[2]<<8)&0xff00)|(cmdBuf[1]&0xff)),
-					   (unsigned)cmdBuf[3],
-					   PCI_DEVFN((unsigned)cmdBuf[4],
-						     (unsigned)cmdBuf[5]));
+				(unsigned)cmdBuf[3],
+				PCI_DEVFN((unsigned)cmdBuf[4],
+				(unsigned)cmdBuf[5]));
 
 		if (mvintdrv_add_pci_dev_to_ar(pdev)) {
-			printk("%s: Cannot reg pdev %p!\n", __func__, pdev);
-			} else pr_info("%s: Queueing pci device for driver cleanup MSI disablement...\n", __func__);
+			pr_err("%s: Cannot reg pdev %p\n", __func__, pdev);
+			} else pr_debug("%s: Queueing pci device for driver cleanup MSI disablement...\n", __func__);
 
 		prt_msi_state("write before msi chk enable", 1, 0 ,0);
 		prt_msi_state("write before msi chk enable", 2, 0 ,0);
 
 		if (pci_dev_msi_enabled(pdev)) {
-			pr_info("%s: PCIe MSI already enabled.\n", __func__);
+			pr_warn("%s: PCIe MSI already enabled.\n", __func__);
 			prt_msi_state("write after msi enable already", 1, 0 ,0);
 			prt_msi_state("write after msi enable already", 2, 0 ,0);
 			pci_read_config_dword(pdev, pdev->msi_cap + PCI_MSI_ADDRESS_LO,
@@ -535,7 +537,7 @@ static ssize_t mvIntDrv_write(struct file *f, const char *buf, size_t siz, loff_
 		prt_msi_state("write before msi enable", 2, 0 ,0);
 		
 		rc = pci_enable_msi(pdev);
-		printk("MSI interrupts for device %s %senabled\n", pdev->dev.kobj.name,
+		pr_info("MSI interrupts for device %s %senabled\n", pdev->dev.kobj.name,
 		       (rc < 0) ? "not " : "");
 
 		prt_msi_state("write after msi enable", 1, 0 ,0);
@@ -619,18 +621,18 @@ static int mvIntDrv_release(struct inode *inode, struct file *file)
 				if (pdev) {
 						
 						pci_dev_get(pdev);
-						printk("%s: Disabling MSI for %p devfn %x vendor %x devid %x msi_cap %x msi_enabled %d\n",
+						pr_debug("%s: Disabling MSI for %p devfn %x vendor %x devid %x msi_cap %x msi_enabled %d\n",
 							__func__, pdev, pdev->devfn, pdev->vendor, pdev->device, pdev->msi_cap, pdev->msi_enabled);
 /*
-						Need to disable MSI before releasing the interrupts, as currently
-						the Kernel will only write the MSI address with zero WITHOUT
-						disabling MSI, causing memory overrun of physical address zero in ARM 32-bit:
-*/
+ *						Need to disable MSI before releasing the interrupts, as currently
+ *						the Kernel will only write the MSI address with zero WITHOUT
+ *						disabling MSI, causing memory overrun of physical address zero in ARM 32-bit:
+ */
 						pci_read_config_word(pdev, pdev->msi_cap + PCI_MSI_FLAGS, &control);
 						control &= ~PCI_MSI_FLAGS_ENABLE;
 						pci_write_config_word(pdev, pdev->msi_cap + PCI_MSI_FLAGS, control);
 
-						printk("%s: New MSI control reg value is: %x\n", __func__, control);
+						pr_debug("%s: New MSI control reg value is: %x\n", __func__, control);
 						
 					}
 			}
@@ -665,7 +667,7 @@ static int mvIntDrv_release(struct inode *inode, struct file *file)
 				pdevs[i] = pdev;
 
 				if (pdev) {
-					pr_info("%s: disabling msi via kernel for %p\n", __func__, pdev);
+					pr_debug("%s: disabling msi via kernel for %p\n", __func__, pdev);
 					pci_disable_msi(pdev);
 				}
 			}
