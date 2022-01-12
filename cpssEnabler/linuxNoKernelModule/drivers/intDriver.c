@@ -53,30 +53,24 @@ disclaimer.
 *       $Revision: 1 $
 *******************************************************************************/
 #define MV_DRV_NAME     "mvIntDrv"
-#define INT_DRV_VER		"1.17"
 #define MV_DRV_MAJOR    244
 #define MV_DRV_MINOR    4
 #define MV_DRV_FOPS     mvIntDrv_fops
-#define MV_DRV_PREINIT  mvIntDrv_PreInitDrv
 #define MV_DRV_POSTINIT mvIntDrv_postInitDrv
 #define MV_DRV_RELEASE  mvIntDrv_releaseDrv
-#define DEBUG
-
 #include "mvDriverTemplate.h"
 
 #include <linux/pci.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/irq.h>
-#include <linux/delay.h>
 
 static int mvIntDrvNumOpened = 0;
 static struct semaphore	*mvIntDrvInterrupsSema; /* Alert other modules on interrupt */
-static struct semaphore mvint_pci_devs_sem;
 
 struct interrupt_slot {
 	int			used;
-	atomic_t			depth; /* keep track of enable/disable */
+	atomic_t		depth; /* keep track of enable/disable */
 	unsigned int		irq;
 	struct semaphore	sem; /* The semaphore on which the user waits */
 	struct semaphore	close_sem; /* Sync disconnect with read */
@@ -85,99 +79,6 @@ struct interrupt_slot {
 
 #define MAX_INTERRUPTS 32
 static struct interrupt_slot mvIntDrv_slots[MAX_INTERRUPTS];
-
-#define MAX_PCI_DEVS 8
-
-struct pci_dev *pci_devs_list[MAX_PCI_DEVS];
-
-void enable_irq_wrapper(unsigned int irq)
-{
-	struct irq_desc *desc = irq_to_desc(irq);
-
-	if (!desc)
-		return;
-	
-	if (WARN(!desc->irq_data.chip,
-		 KERN_ERR "enable_irq before setup/request_irq: irq %u\n", irq))
-		goto out;
-
-	if (!desc->depth) {
-			pr_err("%s: irq desc depth is zero\n");
-			__sync_bool_compare_and_swap(&desc->depth, 0, 1);
-		}
-	
-out:
-
-	enable_irq(irq);
-}
-
-void prt_msi_state(char *msg, unsigned bus, unsigned device, unsigned func)
-{
-	struct pci_dev *pdev;
-	u16 control, org_control;
-	u32 msiaddr;
-	
-	pdev = pci_get_domain_bus_and_slot(0, bus,
-					   PCI_DEVFN(device,
-					   func));
-
-	if (pdev) {
-			pci_read_config_word(pdev, pdev->msi_cap + PCI_MSI_FLAGS, &control);
-			pci_read_config_dword(pdev, pdev->msi_cap + PCI_MSI_ADDRESS_LO,
-				      &msiaddr);
-
-			if ((control & PCI_MSI_FLAGS_ENABLE) && (!msiaddr)) {
-				org_control = control;
-				control &= ~PCI_MSI_FLAGS_ENABLE;
-				pci_write_config_word(pdev, pdev->msi_cap + PCI_MSI_FLAGS, control);
-				
-				pr_err("%s: bdf %x:%x:%x msi ctrl %x msi addr low %x msi_enabled %d MISCONFIGURED will disable MSI\n", 
-						msg, bus, device, func, org_control, msiaddr, 
-						pdev->msi_enabled
-						);
-				}
-		}
-}
-
-int mvintdrv_add_pci_dev_to_ar(struct pci_dev *dev)
-{
-	int i;
-
-	down(&mvint_pci_devs_sem);
-	for (i=0; i<MAX_PCI_DEVS; i++) {
-				if (!pci_devs_list[i]) {
-						pci_devs_list[i] = dev;
-						up(&mvint_pci_devs_sem);
-						return 0;
-					}
-		}
-
-	up(&mvint_pci_devs_sem);
-	return -1;
-}
-
-/*
-	Get and remove the head (first non-NULL item) of the array
-*/
-struct pci_dev *mvintdrv_get_pci_dev_from_ar(void)
-{
-	int i;
-	struct pci_dev *dev;
-	
-	down(&mvint_pci_devs_sem);
-	for (i=0; i<MAX_PCI_DEVS; i++) {
-				if (pci_devs_list[i]) {
-						dev = pci_devs_list[i];
-						pci_devs_list[i] = NULL;
-						up(&mvint_pci_devs_sem);
-						return dev;
-					}
-		}
-
-	up(&mvint_pci_devs_sem);
-	return NULL;
-}
-
 
 int mvintdrv_register_isr_sema(struct semaphore *sema)
 {
@@ -258,19 +159,12 @@ static unsigned int alloc_interrupt_slot(unsigned int irq)
 			up(&sl->close_sem);
 			tasklet_init(&sl->tasklet, mvPresteraBh,
 				     (unsigned long)sl);
-			prt_msi_state("alloc before req", 1, 0 ,0);
-			prt_msi_state("alloc before req", 2, 0 ,0);
 			if (request_irq(irq, prestera_tl_ISR, IRQF_SHARED,
 					"mvIntDrv", (void *)&sl->tasklet))
 				panic("Can not assign IRQ %u to mvIntDrv\n",
 				      irq);
-			atomic_set(&sl->depth, -1); /* assumes depth is zero on call, and decrement it to -1 */
-			prt_msi_state("alloc after req", 1, 0 ,0);
-			prt_msi_state("alloc after req", 2, 0 ,0);
+			atomic_set(&sl->depth, -1);
 			disable_irq(irq);
-			prt_msi_state("alloc after dis", 1, 0 ,0);
-			prt_msi_state("alloc after dis", 2, 0 ,0);
-			
 			return slot;
 		}
 
@@ -305,18 +199,9 @@ static void free_interrupt_slot(int slot)
 	/* In inconsistent state (ex race between disable_irq in ISR and
 	   disable_irq in release event) synch to stable state before freeing
 	   the IRQ */
-
-	prt_msi_state("free before synch", 1, 0 ,0);
-	prt_msi_state("free before synch", 2, 0 ,0);
 	synch_irq_state(sl);
 	up(&sl->close_sem);
-	prt_msi_state("free after synch", 1, 0 ,0);
-	prt_msi_state("free after synch", 2, 0 ,0);
-	prt_msi_state("free before freeirq", 1, 0 ,0);
-	prt_msi_state("free before freeirq", 2, 0 ,0);
 	free_irq(sl->irq, (void*)&(sl->tasklet));
-	prt_msi_state("free after freeirq", 1, 0 ,0);
-	prt_msi_state("free after freeirq", 2, 0 ,0);
 	tasklet_kill(&(sl->tasklet));
 	sl->used = 0;
 	sl->irq = 0;
@@ -361,8 +246,7 @@ static ssize_t mvIntDrv_write(struct file *f, const char *buf, size_t siz, loff_
 	unsigned int irq = -1;
 	char cmdBuf[6];
 	int slot;
-	u32 msiaddr = 0;
-	
+
 	/* Write 2 bytes:
 	 * 'c' intNo       - connect interrupt, returns slot+1
 	 * 'd' intNo       - disable interrupt
@@ -376,8 +260,8 @@ static ssize_t mvIntDrv_write(struct file *f, const char *buf, size_t siz, loff_
 	 * 'Q' i i i i     - query interrupt, whether other drivers are still
 	 *                   attached to it
 	 * 'm' bus dev sel - enable MSI interrupts for pci device
-	 * 
-	 * return <1 - error, slot for connect, 0 for enable/disable, 0/1 for Q
+	 *
+	 * return <!0 - error, slot for connect, 0 for enable/disable, 0/1 for Q
 	 * (query) */
 
 	if (copy_from_user(cmdBuf, buf, ((siz < 6) ? siz : 6))) {
@@ -424,12 +308,7 @@ static ssize_t mvIntDrv_write(struct file *f, const char *buf, size_t siz, loff_
 			return -EINVAL;
 		sl = &(mvIntDrv_slots[slot]);
 		atomic_dec(&sl->depth);
-	
-		prt_msi_state("write before disable", 1, 0 ,0);
-		prt_msi_state("write before disable", 2, 0 ,0);
 		disable_irq(irq);
-		prt_msi_state("write after disable", 1, 0 ,0);
-		prt_msi_state("write after disable", 2, 0 ,0);
 		return 0;
 	}
 
@@ -439,12 +318,7 @@ static ssize_t mvIntDrv_write(struct file *f, const char *buf, size_t siz, loff_
 			return -EINVAL;
 		sl = &(mvIntDrv_slots[slot]);
 		atomic_inc(&sl->depth);
-	
-		prt_msi_state("write before enable", 1, 0 ,0);
-		prt_msi_state("write before enable", 2, 0 ,0);
-		enable_irq_wrapper(irq);
-		prt_msi_state("write after enable", 1, 0 ,0);
-		prt_msi_state("write after enable", 2, 0 ,0);
+		enable_irq(irq);
 		return 0;
 	}
 
@@ -456,42 +330,18 @@ static ssize_t mvIntDrv_write(struct file *f, const char *buf, size_t siz, loff_
 					   (unsigned)cmdBuf[3]));
 	if (pdev) {
 		int rc;
-
-		pr_debug("%s: Got request to enable MSI for %x:%x:%x\n",
-				__func__, 0, (unsigned)cmdBuf[1],
-				PCI_DEVFN((unsigned)cmdBuf[2],
-				(unsigned)cmdBuf[3]));
-
-		if (mvintdrv_add_pci_dev_to_ar(pdev)) {
-			pr_err("%s: Cannot reg pdev %p\n", __func__, pdev);
-			} else pr_debug("%s: Queueing pci device for driver cleanup MSI disablement...\n", __func__);
-
-		prt_msi_state("write before msi chk enable", 1, 0 ,0);
-		prt_msi_state("write before msi chk enable", 2, 0 ,0);
 		if (pci_dev_msi_enabled(pdev)) {
-			pr_warn("%s: PCIe MSI already enabled.\n", __func__);
-			prt_msi_state("write after msi enable already", 1, 0 ,0);
-			prt_msi_state("write after msi enable already", 2, 0 ,0);
-			pci_read_config_dword(pdev, pdev->msi_cap + PCI_MSI_ADDRESS_LO,
-				      &msiaddr);
-			return msiaddr ? 0 : -EINVAL;
+			pci_dev_put(pdev);
+			return 0;
 		}
-
-		
-		prt_msi_state("write before msi enable", 1, 0 ,0);
-		prt_msi_state("write before msi enable", 2, 0 ,0);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,9,0)
 		rc = pci_alloc_irq_vectors(pdev, 1, 1, PCI_IRQ_ALL_TYPES);
 #else
 		rc = pci_enable_msi(pdev);
 #endif
-
-		prt_msi_state("write after msi enable", 1, 0 ,0);
-		prt_msi_state("write after msi enable", 2, 0 ,0);
-
-		pr_info("MSI interrupts for device %s %senabled\n",
+		printk("MSI interrupts for device %s %senabled\n",
 		       pdev->dev.kobj.name, (rc < 0) ? "not " : "");
-
+		pci_dev_put(pdev);
 		return rc;
 	}
 #else
@@ -508,41 +358,14 @@ static ssize_t mvIntDrv_write(struct file *f, const char *buf, size_t siz, loff_
 						     (unsigned)cmdBuf[5]));
 	if (pdev) {
 		int rc;
-
-		pr_debug("%s: Got request to enable MSI for %x:%x:%x\n",
-				__func__, (((cmdBuf[2]<<8)&0xff00)|(cmdBuf[1]&0xff)),
-				(unsigned)cmdBuf[3],
-				PCI_DEVFN((unsigned)cmdBuf[4],
-				(unsigned)cmdBuf[5]));
-
-		if (mvintdrv_add_pci_dev_to_ar(pdev)) {
-			pr_err("%s: Cannot reg pdev %p\n", __func__, pdev);
-			} else pr_debug("%s: Queueing pci device for driver cleanup MSI disablement...\n", __func__);
-
-		prt_msi_state("write before msi chk enable", 1, 0 ,0);
-		prt_msi_state("write before msi chk enable", 2, 0 ,0);
-
 		if (pci_dev_msi_enabled(pdev)) {
-			pr_warn("%s: PCIe MSI already enabled.\n", __func__);
-			prt_msi_state("write after msi enable already", 1, 0 ,0);
-			prt_msi_state("write after msi enable already", 2, 0 ,0);
-			pci_read_config_dword(pdev, pdev->msi_cap + PCI_MSI_ADDRESS_LO,
-				      &msiaddr);
-			return msiaddr ? 0 : -EINVAL;
-			
+			pci_dev_put(pdev);
 			return 0;
 		}
-
-		prt_msi_state("write before msi enable", 1, 0 ,0);
-		prt_msi_state("write before msi enable", 2, 0 ,0);
-		
 		rc = pci_enable_msi(pdev);
-		pr_info("MSI interrupts for device %s %senabled\n", pdev->dev.kobj.name,
+		printk("MSI interrupts for device %s %senabled\n", pdev->dev.kobj.name,
 		       (rc < 0) ? "not " : "");
-
-		prt_msi_state("write after msi enable", 1, 0 ,0);
-		prt_msi_state("write after msi enable", 2, 0 ,0);
-
+		pci_dev_put(pdev);
 		return rc;
 	}
 #else
@@ -568,25 +391,14 @@ static ssize_t mvIntDrv_read(struct file *f, char *buf, size_t siz, loff_t *off)
 	if (!sl->used)
 		return -EINVAL;
 
-	prt_msi_state("read before irq enable", 1, 0 ,0);
-	prt_msi_state("read before irq enable", 2, 0 ,0);
-
 	/* Enable the interrupt vector */
 	atomic_inc(&sl->depth);
-	enable_irq_wrapper(sl->irq);
-
-	prt_msi_state("read after irq enable", 1, 0 ,0);
-	prt_msi_state("read after irq enable", 2, 0 ,0);
+	enable_irq(sl->irq);
 
 	if (down_interruptible(&sl->sem)) {
 		down(&sl->close_sem);
 		atomic_dec(&sl->depth);
-	
-		prt_msi_state("read before irq disable", 1, 0 ,0);
-		prt_msi_state("read before irq disable", 2, 0 ,0);
 		disable_irq(sl->irq);
-		prt_msi_state("read after irq disable", 1, 0 ,0);
-		prt_msi_state("read after irq disable", 2, 0 ,0);
 		up(&sl->close_sem);
 		return -EINTR;
 	}
@@ -607,40 +419,8 @@ static int mvIntDrv_release(struct inode *inode, struct file *file)
 	mvIntDrvNumOpened--;
 	if (!mvIntDrvNumOpened) {
 		/* Cleanup */
-		int i, slot;
+		int slot;
 		struct interrupt_slot *sl;
-		struct pci_dev *pdev, *pdevs[4] = { NULL, NULL, NULL, NULL };
-		u16 control;
-
-		udelay(1750);
-		
-		prt_msi_state("release before msi disable", 1, 0 ,0);
-		prt_msi_state("release before msi disable", 2, 0 ,0);
-		for (i=0; i<2; i++) {
-				pdev = mvintdrv_get_pci_dev_from_ar();
-				if (pdev) {
-						
-						pci_dev_get(pdev);
-						pr_debug("%s: Disabling MSI for %p devfn %x vendor %x devid %x msi_cap %x msi_enabled %d\n",
-							__func__, pdev, pdev->devfn, pdev->vendor, pdev->device, pdev->msi_cap, pdev->msi_enabled);
-/*
- *						Need to disable MSI before releasing the interrupts, as currently
- *						the Kernel will only write the MSI address with zero WITHOUT
- *						disabling MSI, causing memory overrun of physical address zero in ARM 32-bit:
- */
-						pci_read_config_word(pdev, pdev->msi_cap + PCI_MSI_FLAGS, &control);
-						control &= ~PCI_MSI_FLAGS_ENABLE;
-						pci_write_config_word(pdev, pdev->msi_cap + PCI_MSI_FLAGS, control);
-
-						pr_debug("%s: New MSI control reg value is: %x\n", __func__, control);
-						
-					}
-			}
-
-		udelay(20);
-		
-		prt_msi_state("release after msi disable", 1, 0 ,0);
-		prt_msi_state("release after msi disable", 2, 0 ,0);
 
 		for (slot = 0; slot < MAX_INTERRUPTS; slot++) {
 			sl = &(mvIntDrv_slots[slot]);
@@ -655,31 +435,7 @@ static int mvIntDrv_release(struct inode *inode, struct file *file)
 			 * servicing an interrupt */
 			free_interrupt_slot(slot);
 		}
-
-		prt_msi_state("release after free slot", 1, 0 ,0);
-		prt_msi_state("release after free slot", 2, 0 ,0);
-
-		udelay(20);
-		for (i=0; i<2; i++) {
-				pdev = pci_get_domain_bus_and_slot(0, 1+i,
-								   PCI_DEVFN(0,
-								   0));
-				pdevs[i] = pdev;
-
-				if (pdev) {
-					pr_debug("%s: disabling msi via kernel for %p\n", __func__, pdev);
-					pci_disable_msi(pdev);
-				}
-			}
-		
-		udelay(20);
-		
-	for (i=0; i<2; i++) {
-			pdev = pdevs[i];
-			pci_dev_put(pdev);
-		}
 	}
-
 
 	return 0;
 }
@@ -696,14 +452,6 @@ static void mvIntDrv_releaseDrv(void)
 {
 	/* Will be called whan all descriptors are closed */
 }
-
-static int mvIntDrv_PreInitDrv(void)
-{
-	sema_init(&mvint_pci_devs_sem, 1);
-	pr_info("%s: Version: %s\n", __func__, INT_DRV_VER);
-	return 0;
-}
-
 
 static void mvIntDrv_postInitDrv(void)
 {
