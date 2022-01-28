@@ -80,13 +80,106 @@ disclaimer.
 #define MV_DRV_POSTINIT	mvDmaDrv_postInitDrv
 #define MV_DRV_RELEASE	mvDmaDrv_releaseDrv
 
+#define MV_DRV_NAME_VERSION "1.25"
+#define MV_DRV_MAJOR	244
+#define MV_DRV_MINOR	3
+#define MV_DRV_FOPS	mvDmaDrv_fops
+#define MV_DRV_PREINIT  mvDmaDrv_PreInitDrv
+#define MV_DRV_POSTINIT	mvDmaDrv_postInitDrv
+#define MV_DRV_RELEASE	mvDmaDrv_releaseDrv
+
+/* registers */
+#define FDB_GLOBAL_CONF_REG 0x04000000
+
+/* MG registers */
+#define MG_DEVID_REG 0x4C
+#define MG_VENDID_REG 0x50
+#define MG_EXT_GLOBAL_CNTRL_REG 0x5C
+#define MG_AU_Q_HOST_CONF_REG 0xD8
+
+#define MG_UEA_REG 0x208
+
+#define MG_RX_SDMA_Q_CMD_REG 0x2680
+#define MG_TX_SDMA_Q_CMD_REG 0x2868
+
+#define MG_RX_SDMA_RES_ERR_MOD01 0x2860
+#define MG_RX_SDMA_RES_ERR_MOD27 0x2878
+
+#define MG_UDA 0x200
+
+#define MG_INT_IRQ_CAUSE 0x38
+#define MG1_INT_IRQ_CAUSE1 0x144
+#define MGCAM_BAD_ADDR 0x198
+#define MG_UEA 0x208
+#define MG_INT_IRQ_CAUSE3 0x2e8
+#define MG_CM3_SRAM_OOR_ADDR 0x358
+#define MG_INT_IRQ_CAUSE1 0x618
+#define MG_INT_IRQ_CAUSE2 0x678
+#define MG_RX_SDMA_INT_CAUSE0 0x280c
+#define MG_TX_SDMA_INT_CAUSE0 0x2810
+#define MG_RX_SDMA_INT_CAUSE1 0x2890
+#define MG_RX_SDMA_INT_CAUSE2 0x2894
+#define MG_TX_SDMA_INT_CAUSE1 0x2898
+#define MG_TX_SDMA_INT_CAUSE2 0x289C
+
+/* CnM / external interfaces registers: */
+#define CNM_PCIE_CONF_HDR_REG 0x40000
+#define CNM_PCIE_CMD_STAT_REG 0x40004
+
+/* DFX registers */
+#define DFX_SKIP_PCIE_INIT_MATRIX_REG 0x000F806C
+#define DFX_RST_CTRL_REG 0x000F800C
+
+#define DFX_SKIP_REG_INIT_MATRIX_REG 0x000f8020
+#define DFX_SKIP_RAM_INIT_MATRIX_REG 0x000f8030
+#define DFX_SKIP_TABLES_INIT_MATRIX_REG 0x000f8060
+#define DFX_SKIP_EEPROM_INIT_MATRIX_REG 0x000f8068
+#define DFX_SKIP_MBUS_CTRL_INIT_MATRIX_REG 0x000f8044
+#define DFX_SKIP_SERDES_INIT_MATRIX_REG 0x000f8064
+#define DFX_SKIP_DFX_REGS_CONF_INIT_MATRIX_REG 0x000f8098
+#define DFX_SKIP_IHB_INIT_MATRIX_REG 0x000f8048
+
+/* bits */
+#define AUMessageToCPUStop_BIT 0x40000000
+#define SDMA_SW_RST_BIT 0x40
+#define STOP_AU_Q_BIT 0x1
+#define RESET_AU_Q_CNTRS_BITS 0x6
+
+#define STOP_ALL_Q_BITS 0xff00
+
+/* Retry counter = 0, No Retry, Drop in case of resource error */
+#define RX_SDMA_ERR_MOD 0x100
+
+/* CnM / external interfaces register bits: */
+#define PCIE_MASTER_BIT 0x4
+
+/* DFX register bits: */
+
+/* all of these bits are active low (require setting to zero) */
+#define SKIP_INIT_SOFT_RST_BIT 0x100
+#define SKIP_INIT_SOFT_RST_ALL_SUBS_BITS 0x1FF
+#define SKIP_INIT_SOFT_RST_ONLY_SUBS_BITS 0xFF
+
+#define MG_SOFT_RST_TRIGGER_BIT 0x2
+#define TABLE_START_INIT_BIT 0x4
+
+#define DFX_SOFT_RST_BITS (MG_SOFT_RST_TRIGGER_BIT | TABLE_START_INIT_BIT)
+
+#define SECS_DELAY_WQ 10
+
 #include "mvDriverTemplate.h"
 
+#include <linux/delay.h>
 #include <linux/pci.h>
 #include <linux/dma-mapping.h>
 #include <linux/kallsyms.h>
 #include <linux/platform_device.h>
 #include <linux/of_reserved_mem.h>
+#include <asm/div64.h>
+#include <linux/platform_device.h>
+#include <linux/of_reserved_mem.h>
+#include <linux/workqueue.h>
+#include <linux/jiffies.h>
 
 #ifdef MTS_BUILD
 #define LINUX_VMA_DMABASE 0x19000000UL
@@ -96,7 +189,7 @@ disclaimer.
 #if defined(CONFIG_X86_64)
 #define LINUX_VMA_DMABASE 0x1fc00000UL
 #elif defined(CONFIG_X86) || defined(CONFIG_ARCH_MULTI_V7) || defined(CONFIG_ARM64)
-#define LINUX_VMA_DMABASE 0x60000000UL
+#define LINUX_VMA_DMABASE 0x1c800000UL
 #endif /* CONFIG_X86 || CONFIG_ARCH_MULTI_V7 || CONFIG_ARM64 */
 #ifdef CONFIG_MIPS
 #define LINUX_VMA_DMABASE 0x2c800000UL
@@ -116,17 +209,33 @@ disclaimer.
 static u8 platdrv_registered;
 static struct device *platdrv_dev;
 
+#define MV_DMA_ALLOC_FLAGS GFP_DMA32 | GFP_NOFS
+
+/* Did we successfully registered as platform driver? zero means yes */
+static u8 platdrv_registered;
+static struct device *platdrv_dev;
+
 struct dma_mapping {
 	void *virt;
-	dma_addr_t dma;
+    dma_addr_t dma;
+	void *virt_dummy[16];
+	dma_addr_t dma_dummy[16];
 #ifdef MMAP_USE_REMAP_PFN_RANGE
 	phys_addr_t phys;
+	phys_addr_t phys_dummy[16];
 #endif
 	size_t size;
+	loff_t pci_offset;
+	struct pci_dev *pdev;
 	struct device *dev;
+	/* First index to array is the Packet Processor unit number, Second is the PCIe bar (0/2/4) */
+	void __iomem *base[4][8];
+	struct pci_dev *pdevs_list[4];
+	struct delayed_work free_mem_delayed;
 };
 
 static struct dma_mapping *shared_dmaBlock;
+static struct semaphore mvdma_sem;
 
 /*
  * 64bit modulo division is undefined in 32bit armhf
@@ -159,8 +268,9 @@ static int mvDmaDrv_mmap(struct file *file, struct vm_area_struct *vma)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,11,0)
 	int (*dma_configure)(struct device *dev);
 	int ret;
-#endif
 
+	/* Until LK 4.11, dma_alloc_coherent(NULL, ...) is allowed, and used in
+	   case of AC3 */
 	if (!m->dev && !platdrv_dev) {
 		printk(KERN_ERR "%s: Nither PCI, nor Platform device is registered, cannot mmap\n",
 		       MV_DRV_NAME);
@@ -169,6 +279,7 @@ static int mvDmaDrv_mmap(struct file *file, struct vm_area_struct *vma)
 
 	if (!m->dev && platdrv_dev)
 		m->dev = platdrv_dev;
+#endif
 
 	dev_info(m->dev, "%s(file=%p) data=%p LINUX_VMA_DMABASE=0x%lx\n",
 		 __func__, file, m, LINUX_VMA_DMABASE);
@@ -177,22 +288,16 @@ static int mvDmaDrv_mmap(struct file *file, struct vm_area_struct *vma)
 		return -ENXIO;
 
 	if (vma->vm_start == LINUX_VMA_DMABASE && shared_dmaBlock) {
-		dev_dbg(m->dev, "SHM mode\n");
 		if (m != shared_dmaBlock) {
-			dev_dbg(m->dev,
-				"SHM mode, new client instance, redirecting to pre-allocated block\n");
 			kfree(m);
 			file->private_data = shared_dmaBlock;
 		}
 		m = shared_dmaBlock;
 	} else {
 		if (vma->vm_start == LINUX_VMA_DMABASE) {
-			dev_dbg(m->dev, "SHM mode, first client instance\n");
 			shared_dmaBlock = m;
 		}
-
-		/* don't config dma_ops in case of no-dev, or for platdrv_dev */
-		if (m->dev && !platdrv_dev) {
+        if (m->dev && !platdrv_dev) { /* don't config dma_ops in case of no-dev, or for platdrv_dev */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,11,0)
 		/* The new DMA framework, that was added in 4.11 (compared to
  		 * 4.4), does not initiate each PCI dev as DMA-enabled by
@@ -353,19 +458,124 @@ static ssize_t mvDmaDrv_read(struct file *f, char *buf, size_t siz, loff_t *off)
 	return sizeof(dma);
 }
 
+static void mvdma_free_memory_func(struct work_struct *work)
+{
+	struct dma_mapping *m;
+	struct pci_dev *pdev;
+	u32 val;
+	int i, ii;
+
+	pr_info("%s: start\n", __func__);
+
+	m = container_of(to_delayed_work(work), struct dma_mapping, free_mem_delayed);
+	if (!m->dev) {
+	   pr_info("%s: No PCI device assigned!\n", __func__);
+	   }
+		else {
+			for (i=0; i<2; i++) {
+
+				pdev = m->pdevs_list[i];
+
+				if (!pdev) {
+					continue;
+				}
+
+				/* PCIe bars in AC3X / Aldrin are 0,2,4 */
+				for (ii=0; ii<6; ii+=2) {
+					if (!m->base[i][ii]) {
+						continue;
+						}
+					pr_info("%s: Unmapping PCI bar %d...\n", __func__, i);
+					pcim_iounmap(pdev, m->base[i][ii]);
+
+				}
+
+			   }
+		     }
+
+	if (m != shared_dmaBlock) {
+		pr_info("%s: Freeing DMA memory...\n", __func__);
+		mvDmaDrv_free_dma_block(m);
+		kfree(m);
+	}
+
+	pr_info("%s: %s Driver freed to serve new request...\n", MV_DRV_NAME, __func__);
+	up(&mvdma_sem);
+}
+
 static int mvDmaDrv_open(struct inode *inode, struct file *file)
 {
 	struct dma_mapping *m;
+
+	down(&mvdma_sem);
+	printk("%s: %s Driver allocating to serve new request...\n", MV_DRV_NAME, __func__);
 
 	m = kzalloc(sizeof(struct dma_mapping), GFP_KERNEL);
 	if (!m)
 		return -ENOMEM;
 
+	INIT_DELAYED_WORK(&m->free_mem_delayed, mvdma_free_memory_func);
 	file->private_data = m;
 
 	printk("%s: %s(file=%p) data=%p\n", MV_DRV_NAME, __func__, file, m);
 
 	return 0;
+}
+
+static int mvDmaDrv_PollIRQStats(void __iomem *base)
+{
+ u32 val;
+
+	/* Clear on Read registers: */
+ val = readl(base + MG_RX_SDMA_INT_CAUSE0);
+ pr_info("%s: reg %x = %x\n", __func__, MG_RX_SDMA_INT_CAUSE0, val);
+
+ val = readl(base + MG_TX_SDMA_INT_CAUSE0);
+ pr_info("%s: reg %x = %x\n", __func__,  MG_TX_SDMA_INT_CAUSE0, val);
+
+ val = readl(base + MG_RX_SDMA_INT_CAUSE1);
+ pr_info("%s: reg %x = %x\n", __func__,  MG_RX_SDMA_INT_CAUSE1, val);
+
+ val = readl(base + MG_RX_SDMA_INT_CAUSE2);
+ pr_info("%s: reg %x = %x\n", __func__,  MG_RX_SDMA_INT_CAUSE2, val);
+
+ val = readl(base + MG_TX_SDMA_INT_CAUSE1);
+ pr_info("%s: reg %x = %x\n",  __func__, MG_TX_SDMA_INT_CAUSE1, val);
+
+ val = readl(base + MG_TX_SDMA_INT_CAUSE2);
+ pr_info("%s: reg %x = %x\n",  __func__, MG_TX_SDMA_INT_CAUSE2, val);
+
+ /* Clear on Write cause registers: */
+ val = readl(base + MG_INT_IRQ_CAUSE);
+ pr_info("%s: reg %x = %x\n",  __func__, MG_INT_IRQ_CAUSE, val);
+ writel(0, base + MG_INT_IRQ_CAUSE);
+
+ val = readl(base + MG1_INT_IRQ_CAUSE1);
+ pr_info("%s: reg %x = %x\n",  __func__, MG1_INT_IRQ_CAUSE1, val);
+ writel(0, base + MG1_INT_IRQ_CAUSE1);
+
+ val = readl(base + MG_INT_IRQ_CAUSE3);
+ pr_info("%s: reg %x = %x\n",  __func__, MG_INT_IRQ_CAUSE3, val);
+ writel(0, base + MG_INT_IRQ_CAUSE3);
+
+ val = readl(base + MG_INT_IRQ_CAUSE1);
+ pr_info("%s: reg %x = %x\n",  __func__, MG_INT_IRQ_CAUSE1, val);
+ writel(0, base + MG_INT_IRQ_CAUSE1);
+
+ val = readl(base + MG_INT_IRQ_CAUSE2);
+ pr_info("%s: reg %x = %x\n",  __func__, MG_INT_IRQ_CAUSE2, val);
+ writel(0, base + MG_INT_IRQ_CAUSE2);
+
+ val = readl(base + MGCAM_BAD_ADDR);
+ pr_info("%s: reg %x = %x\n",  __func__, MGCAM_BAD_ADDR, val);
+
+ val = readl(base + MG_UEA);
+ pr_info("%s: reg %x = %x\n",  __func__, MG_UEA, val);
+
+ val = readl(base + MG_CM3_SRAM_OOR_ADDR );
+ pr_info("%s: reg %x = %x\n",  __func__, MG_CM3_SRAM_OOR_ADDR , val);
+
+ return 0;
 }
 
 static loff_t mvDmaDrv_lseek(struct file *file, loff_t off, int unused)
@@ -392,18 +602,227 @@ static loff_t mvDmaDrv_lseek(struct file *file, loff_t off, int unused)
 	return 0;
 }
 
+static int mvDmaDrv_do_CPSS_skip_sequence_pcie(void __iomem *base)
+	u32 val;
+
+	val = readl(base + DFX_SKIP_REG_INIT_MATRIX_REG);
+	val |= SKIP_INIT_SOFT_RST_BIT;
+	writel(val, base + DFX_SKIP_REG_INIT_MATRIX_REG);
+
+	val = readl(base + DFX_SKIP_RAM_INIT_MATRIX_REG);
+	val |= SKIP_INIT_SOFT_RST_BIT;
+	writel(val, base + DFX_SKIP_RAM_INIT_MATRIX_REG);
+
+	val = readl(base + DFX_SKIP_TABLES_INIT_MATRIX_REG);
+	val |= SKIP_INIT_SOFT_RST_BIT;
+	writel(val, base + DFX_SKIP_TABLES_INIT_MATRIX_REG);
+
+	val = readl(base + DFX_SKIP_EEPROM_INIT_MATRIX_REG);
+	val |= SKIP_INIT_SOFT_RST_BIT;
+	writel(val, base + DFX_SKIP_EEPROM_INIT_MATRIX_REG);
+
+	val = readl(base + DFX_SKIP_MBUS_CTRL_INIT_MATRIX_REG);
+	val &= ~SKIP_INIT_SOFT_RST_BIT;
+	writel(val, base + DFX_SKIP_MBUS_CTRL_INIT_MATRIX_REG);
+
+	val = readl(base + DFX_SKIP_SERDES_INIT_MATRIX_REG);
+	val |= SKIP_INIT_SOFT_RST_BIT;
+	writel(val, base + DFX_SKIP_SERDES_INIT_MATRIX_REG);
+
+	writel(SKIP_INIT_SOFT_RST_ALL_SUBS_BITS, base + DFX_SKIP_REG_INIT_MATRIX_REG);
+
+	writel(SKIP_INIT_SOFT_RST_ALL_SUBS_BITS, base + DFX_SKIP_TABLES_INIT_MATRIX_REG);
+
+	writel(SKIP_INIT_SOFT_RST_ONLY_SUBS_BITS, base + DFX_SKIP_MBUS_CTRL_INIT_MATRIX_REG);
+
+	val = readl(base + DFX_SKIP_DFX_REGS_CONF_INIT_MATRIX_REG);
+	val &= ~SKIP_INIT_SOFT_RST_BIT;
+	writel(val, base + DFX_SKIP_DFX_REGS_CONF_INIT_MATRIX_REG);
+
+	val = readl(base + DFX_SKIP_RAM_INIT_MATRIX_REG);
+	val &= ~SKIP_INIT_SOFT_RST_BIT;
+	writel(val, base + DFX_SKIP_RAM_INIT_MATRIX_REG);
+
+	val = readl(base + DFX_SKIP_IHB_INIT_MATRIX_REG);
+	val &= ~SKIP_INIT_SOFT_RST_BIT;
+	writel(val, base + DFX_SKIP_IHB_INIT_MATRIX_REG);
+
+	return 0;
+}
+
+static int mvDmaDrv_stopAndReset_AC3X_Aldrin_PP(struct dma_mapping *m)
+{
+ struct pci_dev *pdev;
+ int err, i, ii;
+ u32 val, did, vid, sdma_rx_q_cmd_val_before[2], pcie_conf_hdr[2], dfx_rst_reg[2], skip_pcie_reg[2];
+ loff_t off;
+ int domain;
+ unsigned int bus;
+ unsigned int devfn;
+ int reset_done = 0;
+
+ if (!m->dev) {
+	pr_info("%s: No PCI device assigned!\n", __func__);
+	return -ENOENT;
+ 	}
+
+ for (i=0; i<2; i++) {
+ 	 off = m->pci_offset;
+	 domain = (off >> 16) & 0xffff;
+	 bus = (off >> 8) & 0xff;
+	 devfn = PCI_DEVFN(((off >> 3) & 0x1f), (off & 0x07));
+
+	 pdev = pci_get_domain_bus_and_slot(domain, bus + i, devfn);
+
+	 if (!pdev) {
+		pr_info("%s: Failed to get PCI device %x:%x:%x.%x\n", __func__, domain, bus + i, (unsigned)((off >> 3) & 0x1f), (unsigned)(off & 0x07));
+		continue;
+	 	}
+
+	 m->pdevs_list[i] = pdev;
+	 err = pcim_enable_device(pdev);
+
+	 if (err) {
+		pr_info("%s: pcim enable device failed err %d!\n",__func__,err);
+		return err;
+	 }
+
+        if (!err){
+
+                m->base[i][2] = pcim_iomap(pdev, 2, 64*1024*1024); /* switching registers/MG 64M AC3X/BC2/Aldrin only*/
+
+               if (m->base[i][2]) {
+                       /*
+                        * Write Receive SDMA Queue Command Register in MG with stop all RX queues Values
+                        * This will disable all of the SDMA RX reception.
+                        * This covers situation in
+                        * which SIGKILL is sent to CPSS application which will cause it to release
+                        * the mvDMA driver file descriptor and call this callback. Writing these
+                        * bits with ones will ensure the Packet Processor SDMA RX is reset to a determined
+                        * state without having the RX DMA running unsupervised.
+                        */
+
+						/* disable retries on resource error */
+						writel(RX_SDMA_ERR_MOD, m->base[i][2] + MG_RX_SDMA_RES_ERR_MOD01);
+
+						writel(RX_SDMA_ERR_MOD, m->base[i][2] + MG_RX_SDMA_RES_ERR_MOD01 + 0x4);
+
+						for (ii=0; ii<6; ii++)
+							writel(RX_SDMA_ERR_MOD, m->base[i][2] + MG_RX_SDMA_RES_ERR_MOD27 + (0x4 * ii));
+
+						 /* Stop SDMA RX - prevent writing on memory which will be released to kernel */
+						writel(STOP_ALL_Q_BITS, m->base[i][2] + MG_RX_SDMA_Q_CMD_REG);
+
+			   			/* Stop SDMA TX - descriptor writeback might corrupt memory */
+			   		   writel(STOP_ALL_Q_BITS, m->base[i][2] + MG_TX_SDMA_Q_CMD_REG);
+
+						/* Stop FDB AU messages to CPU (FDB unit) */
+
+						/* Stop AU messages on MG (DMA) */
+					   writel(STOP_AU_Q_BIT, m->base[i][2] + MG_AU_Q_HOST_CONF_REG);
+
+						/* Reset AU+FU queue counters (reset queue) on MG (DMA) */
+					   writel(RESET_AU_Q_CNTRS_BITS | STOP_AU_Q_BIT, m->base[i][2] + MG_AU_Q_HOST_CONF_REG);
+
+						/* Finally, completely reset SDMA: */
+						val = readl(m->base[i][2] + MG_EXT_GLOBAL_CNTRL_REG);
+
+						val |= SDMA_SW_RST_BIT;
+
+						writel(val, m->base[i][2] + MG_EXT_GLOBAL_CNTRL_REG);
+
+					    val &= ~SDMA_SW_RST_BIT;
+
+					    writel(val, m->base[i][2] + MG_EXT_GLOBAL_CNTRL_REG);
+
+               }
+	       else pr_info("%s: base %d BAR2 not mappable!\n", __func__, i);
+
+
+				m->base[i][0] = pcim_iomap(pdev, 0, 1*1024*1024); /* CnM / external interfaces registers 1M AC3X/BC2/Aldrin only*/
+
+				if (m->base[i][0]) {
+
+					/* Disable PCIe bus mastering from AC3X/Aldrin to CPU/SOC: */
+
+					val = readl(m->base[i][0] + CNM_PCIE_CMD_STAT_REG);
+
+					val &= ~PCIE_MASTER_BIT;
+
+					writel(val, m->base[i][0] + CNM_PCIE_CMD_STAT_REG);
+
+					}
+					else pr_info("%s: base %d BAR0 not mappable!\n", __func__, i);
+
+
+					m->base[i][4] = pcim_iomap(pdev, 4, 8*1024*1024); /* DFX 8M AC3X/BC2/Aldrin only*/
+
+
+					if (m->base[i][4]) {
+						/* Set Skip PCIe reset when doing MG soft reset sequence: */
+						/* Finally, soft reset Packet Processor: */
+ 			          /*
+			                Behavior is un-predictable (probably the device will hang)
+			                if CPU try to read/write registers/tables
+			                of the device during the time of soft reset
+			                (Soft reset is active for 2000 core clock cycles (6uS). Waiting 20uS should be enough)
+			                Event when '<PEX Skip Init if MG Soft Reset> = SKIP INIT ON'
+			                (no pex reset).
+			                *******************************
+			                meaning that even when skip pex reset there is still interval of
+			                time that the CPU must not approach the device.
+			            */
+
+			            mvDmaDrv_do_CPSS_skip_sequence_pcie(m->base[i][4]);
+
+						val = readl(m->base[i][4] + DFX_RST_CTRL_REG);
+
+						val &= ~DFX_SOFT_RST_BITS;
+
+						dfx_rst_reg[i] = val;
+
+						mb(); /* Synchronize CPU to finish all writes to PP address space in order to ensure no writes to PP will happen */
+
+						writel(val, m->base[i][4] + DFX_RST_CTRL_REG);
+
+						mb();
+
+						reset_done++;
+
+						}
+						else pr_info("%s: base %d BAR4 not mappable!\n", __func__, i);
+
+        }
+	else pr_info("%s: unable to iomap %d. err %d!", __func__, i, err);
+ 	}
+
+	 udelay(20);
+
+ 	for (i=0; i<2; i++) {
+		pr_info("%s: Stopped DMA on PCI device %x:%x:%x.%x\n", __func__, domain, bus + i, (unsigned)((off >> 3) & 0x1f), (unsigned)(off & 0x07));
+		if (reset_done)
+		   printk("%s: device %d: Wrote %x to DFX rst reg %x reset_cnt %d\n",
+				   __func__, i, dfx_rst_reg[i], DFX_RST_CTRL_REG, reset_done);
+
+ 		}
+
+	return err;
+}
+
 static int mvDmaDrv_release(struct inode *inode, struct file *file)
 {
 	struct dma_mapping *m = (struct dma_mapping *)file->private_data;
+	int ret;
 
 	printk("%s: %s(file=%p) data=%p\n", MV_DRV_NAME, __func__, file, m);
+	ret = mvDmaDrv_stopAndReset_AC3X_Aldrin_PP(m);
 
-	if (m != shared_dmaBlock) {
-		free_dma_block(m);
-		kfree(m);
-	}
+	printk("%s: %s: return value of stop and reset PP SDMA RX is: %d\n",
+			MV_DRV_NAME, __func__, ret);
+	printk("%s: delaying DMA memory free by %d second...\n", __func__, SECS_DELAY_WQ);
+	schedule_delayed_work(&m->free_mem_delayed, msecs_to_jiffies(1000*SECS_DELAY_WQ));
 
-	return 0;
+	return ret;
 }
 
 static int mvdmadrv_pdriver_probe(struct platform_device *pdev)
@@ -430,7 +849,20 @@ static int mvdmadrv_pdriver_remove(struct platform_device *pdev)
 	of_reserved_mem_device_release(&pdev->dev);
 
 	return 0;
-}
+ }
+
+static const struct of_device_id mvdmadrv_of_match_ids[] = {
+	 { .compatible = "marvell,mv_dma", },
+};
+
+static struct platform_driver mvdmadrv_platform_driver = {
+	.probe		= mvdmadrv_pdriver_probe,
+	.remove		= mvdmadrv_pdriver_remove,
+	.driver		= {
+		.name	= MV_DRV_NAME,
+		.of_match_table = mvdmadrv_of_match_ids,
+	},
+};
 
 static const struct of_device_id mvdmadrv_of_match_ids[] = {
 	 { .compatible = "marvell,mv_dma", },
@@ -459,10 +891,18 @@ static void mvDmaDrv_releaseDrv(void)
 		platform_driver_unregister(&mvdmadrv_platform_driver);
 
 	if (shared_dmaBlock) {
-		free_dma_block(shared_dmaBlock);
+		mvDmaDrv_free_dma_block(shared_dmaBlock);
 		kfree(shared_dmaBlock);
 	}
 }
+static int mvDmaDrv_PreInitDrv(void)
+{
+	sema_init(&mvdma_sem, 1);
+	printk("%s: %s version %s\n", __func__, MV_DRV_NAME, MV_DRV_NAME_VERSION);
+
+	return 0;
+}
+
 static void mvDmaDrv_postInitDrv(void)
 {
 	int err;
