@@ -102,7 +102,7 @@ void enable_irq_wrapper(unsigned int irq)
 		goto out;
 
 	if (!desc->depth) {
-			pr_err("%s: irq desc depth is zero\n");
+			pr_err("%s: irq desc depth is zero\n", __FUNCTION__);
 			__sync_bool_compare_and_swap(&desc->depth, 0, 1);
 		}
 
