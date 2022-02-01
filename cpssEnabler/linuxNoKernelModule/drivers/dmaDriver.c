@@ -945,8 +945,10 @@ static loff_t mvDmaDrv_lseek(struct file *file, loff_t off, int unused)
 	if (platdrv_dev) /* device-tree reservation */
 		return 0;
 
+	m->pci_offset = off;
 	pdev = pci_get_domain_bus_and_slot(domain, bus, devfn);
 	if (pdev) {
+		m->pdev = pdev;
 		m->dev = &(pdev->dev);
 		pr_info("%s: Using PCI device %s\n", MV_DRV_NAME,
 		       m->dev->kobj.name);
