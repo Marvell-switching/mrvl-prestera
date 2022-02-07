@@ -1,10 +1,7 @@
 # -*-makefile-*-
 # call from kernel build system
 
-TARGETS = mvDmaDrv mvIntDrv
-ifeq (CPU_ARM_zImage, $(CPU_FAMILY)_$(LSP_KERNEL_TYPE))
-TARGETS += mvMbusDrv
-endif
+TARGETS = mvDmaDrv mvIntDrv mvMbusDrv
 ifeq ("$(TARGET)", "armv8")
 TARGETS += mvEthDrv
 endif
@@ -19,13 +16,11 @@ FULL_PATH := $(subst /cpssEnabler/,/ cpssEnabler/,$(M))
 HOME_DIR := $(strip $(firstword $(FULL_PATH)))
 endif
 
-ccflags-y := -I$(HOME_DIR)common/h
+ccflags-y := -I$(HOME_DIR)common/h -I$(HOME_DIR)/cpssEnabler/mainExtDrv/h
 obj-m := $(addsuffix .o,$(TARGETS))
 mvDmaDrv-y := dmaDriver.o
 mvIntDrv-y := intDriver.o
-ifeq (CPU_ARM_zImage, $(CPU_FAMILY)_$(LSP_KERNEL_TYPE))
 mvMbusDrv-y := mbusDriver.o mbusResources.o
-endif
 ifeq ("$(TARGET)", "armv8")
 mvEthDrv-y := ethDriver.o
 endif

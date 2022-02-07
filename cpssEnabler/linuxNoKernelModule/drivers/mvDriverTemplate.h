@@ -58,9 +58,11 @@ disclaimer.
 #include <linux/module.h>
 #include <linux/device.h>
 #include <linux/slab.h>
+#if 0 /* CPSS_SWDEV_AGENT_MODE */
 #include <cpss/generic/version/cpssGenStream.h>
 
 MODULE_VERSION(CPSS_STREAM_NAME_CNS);
+#endif
 
 static int                  major = 0;
 static int                  minor = MV_DRV_MINOR;

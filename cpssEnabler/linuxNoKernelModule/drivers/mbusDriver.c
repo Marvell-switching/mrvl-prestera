@@ -63,12 +63,17 @@ disclaimer.
 
 #include <linux/mm.h>
 #include <linux/of.h>
+#include <linux/mbus.h>
+
+#include <gtExtDrv/os/linux/mbus.h>
 
 #include "mvResources.h"
 
+int mvMbusDrvDevId = 0;
+
 static int mvMbusDrv_mmap(struct file * file, struct vm_area_struct *vma)
 {
-	struct mv_resource_info res;
+	struct mv_resource_info res = {0};
 	switch ((int)vma->vm_pgoff) {
 	case MV_RESOURCE_MBUS_RUNIT:
 	case MV_RESOURCE_MBUS_SWITCH:
@@ -76,8 +81,14 @@ static int mvMbusDrv_mmap(struct file * file, struct vm_area_struct *vma)
 	case MV_RESOURCE_MBUS_DRAGONITE_ITCM:
 	case MV_RESOURCE_MBUS_DRAGONITE_DTCM:
 	case MV_RESOURCE_MBUS_PSS_PORTS:
-		if (mvGetResourceInfo((int)vma->vm_pgoff, &res) < 0)
-			return -ENXIO;
+        if((mvMbusDrvDevId == MV_MBUS_DRV_DEV_ID_AC5) || 
+            (mvMbusDrvDevId == MV_MBUS_DRV_DEV_ID_AC5X)) {
+		    if (mvGetSip6ResourceInfo((int)vma->vm_pgoff, mvMbusDrvDevId, &res) < 0)
+			    return -ENXIO;
+        } else {
+		    if (mvGetResourceInfo((int)vma->vm_pgoff, &res) < 0)
+			    return -ENXIO;
+        }
 		break;
 	default:
 		return -ENXIO;
@@ -106,8 +117,7 @@ static int mvMbusDrv_mmap(struct file * file, struct vm_area_struct *vma)
 
 static ssize_t mvMbusDrv_read(struct file *f, char *buf, size_t siz, loff_t *off)
 {
-	struct mv_resource_info res;
-	int rc;
+	struct mv_resource_info res = {0};
 	unsigned long long rv;
 
 #if 0
@@ -115,9 +125,15 @@ static ssize_t mvMbusDrv_read(struct file *f, char *buf, size_t siz, loff_t *off
 #endif
 	if (siz < sizeof(rv))
 		return -EINVAL;
-	rc = mvGetResourceInfo(((int)f->f_pos) & MV_RESOURCE_ID_MASK, &res);
-	if (rc < 0)
-		return -ENOENT;
+    if((mvMbusDrvDevId == MV_MBUS_DRV_DEV_ID_AC5) || 
+        (mvMbusDrvDevId == MV_MBUS_DRV_DEV_ID_AC5X)) {
+		if (mvGetSip6ResourceInfo(((int)f->f_pos) & MV_RESOURCE_ID_MASK, mvMbusDrvDevId, &res) < 0)
+			return -ENXIO;
+    } else {
+		if (mvGetResourceInfo(((int)f->f_pos) & MV_RESOURCE_ID_MASK, &res) < 0)
+			return -ENXIO;
+    }
+
 	if (((int)f->f_pos) & MV_RESOURCE_START)
 		rv = (unsigned long long)res.start;
 	else
@@ -141,6 +157,30 @@ static int mvMbusDrv_open(struct inode *inode, struct file *file)
 	return 0;
 }
 
+static long mvMbusDrv_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+{
+	switch (cmd)
+	{
+	case MBUS_IOC_WIN_CFG_CMD:
+		{
+#ifdef CONFIG_ARM
+			struct mbus_cmd_io_win win;
+
+			if (copy_from_user(&win, (void __user *) arg, sizeof(win)))
+				return -EFAULT;
+
+			return mvebu_mbus_add_window_remap_by_id(win.target,
+					win.attr, win.base, win.size,
+					win.remap);
+#else
+			return -ENOTSUPP;
+#endif
+		};
+	}
+
+	return -EINVAL;
+}
+
 static int mvMbusDrv_release(struct inode *inode, struct file *file)
 {
 	return 0;
@@ -151,11 +191,13 @@ static struct file_operations mvMbusDrv_fops = {
 	.read   = mvMbusDrv_read,
 	.llseek = mvMbusDrv_llseek,
 	.open   = mvMbusDrv_open,
+	.unlocked_ioctl = mvMbusDrv_ioctl,
 	.release= mvMbusDrv_release /* A.K.A close */
 };
 
 static void mvMbusDrv_postInitDrv(void)
 {
 	printk(KERN_DEBUG "mvMbusDrv major=%d minor=%d\n", major, minor);
+	mvMbusDrvDevId = mvGetDeviceId();
 }
 

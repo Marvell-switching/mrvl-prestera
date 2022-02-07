@@ -25,57 +25,30 @@ WARRANTIES OF MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE ARE EXPRESSLY
 DISCLAIMED.  The GPL License provides additional details about this warranty
 disclaimer.
 ********************************************************************************
-* mvResources.h
+* mbus.h
 *
 * DESCRIPTION:
-*       Resource numbers for mbusDriver
-*       Should be never changed, just new resources can be added
+*       mbus driver API user space header
 *
 * DEPENDENCIES:
 *
 *       $Revision: 1 $
 *******************************************************************************/
-#ifndef __mvResources_h__
-#define __mvResources_h__
+#ifndef __mbus_h__
+#define __mbus_h__
 
-#ifdef __KERNEL__
 #include <linux/types.h>
 
-struct mv_resource_info {
-	phys_addr_t start;
-	phys_addr_t size;
+struct mbus_cmd_io_win {
+	__u32 base;
+	__u32 remap;
+	__u32 size;
+	__u8 target;
+	__u8 attr;
 };
 
-int mvGetResourceInfo(int resource, struct mv_resource_info *res);
-int mvGetSip6ResourceInfo(int resource, int device, struct mv_resource_info *res);
-int mvGetDeviceId(void);
+#define MBUS_IOC_BASE	'm'
+
+#define MBUS_IOC_WIN_CFG_CMD		_IOWR(MBUS_IOC_BASE, 0, struct mbus_cmd_io_win)
+
 #endif
-
-/* resources. The constants will be never changed, only new can be added */
-#define MV_RESOURCE_ID_MASK             0x0000ffff
-#define MV_RESOURCE_START               0x00010000
-#define MV_RESOURCE_SIZE                0x00000000
-#define MV_RESOURCE_DEV_ID              0 /* .start == device id */
-#define MV_RESOURCE_MBUS_RUNIT          1 /* Control and Management area */
-#define MV_RESOURCE_MBUS_SWITCH         2
-#define MV_RESOURCE_MBUS_DFX            3
-#define MV_RESOURCE_MBUS_SWITCH_IRQ     4 /* .start == irq */
-#define MV_RESOURCE_MBUS_DRAGONITE_ITCM 5
-#define MV_RESOURCE_MBUS_DRAGONITE_DTCM 6
-#define MV_RESOURCE_MBUS_PSS_PORTS      7
-
-#define IOCTL_MV_MBUS_DRV_MAGIC         'M'
-#define IOCTL_MV_MBUS_DRV_SET_DEV_ID    _IOW(IOCTL_MV_MBUS_DRV_MAGIC, 1, int)
-
-#define MV_MBUS_DRV_DEV_ID_UNKNOWN      0
-#define MV_MBUS_DRV_DEV_ID_AC5          1
-#define MV_MBUS_DRV_DEV_ID_AC5X         2
-
-#define CNM_DEV_ID_REG_ADDR         0x7F90004C
-#define CNM_DEV_ID_REG_SIZE         4
-#define CNM_DEV_ID_VAL_AC5          0x000B4000
-#define CNM_DEV_ID_VAL_AC5X         0x00098000
-#define CNM_DEV_ID_VAL_MASK         0x000FF000
-
-#endif /* __mvResources_h__ */
-

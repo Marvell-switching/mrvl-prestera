@@ -48,10 +48,13 @@ disclaimer.
 #include <linux/memory.h>
 #include <linux/io.h>
 #include <linux/pci.h>
+#include <linux/sizes.h>
 #include "mvResources.h"
 
 #define CUSTOM(id) (((id) & 0xF0000000) >> 24)
 #define TARGET_ATTR(id) (((id) & 0x0FFF0000) >> 16)
+
+unsigned int sip6_devid = 0x0;
 
 static int mvGetMbusResource(int resource, struct mv_resource_info *res)
 {
@@ -152,6 +155,9 @@ int mvGetResourceInfo(int resource, struct mv_resource_info *res)
 #else
 	void __iomem *ptr;
 #endif
+	res->start = 0;
+	res->size = 0;
+
 	switch (resource) {
 	case MV_RESOURCE_DEV_ID:
 #ifdef __aarch64__
@@ -188,5 +194,115 @@ int mvGetResourceInfo(int resource, struct mv_resource_info *res)
 		return mvGetMbusInterrupt(res);
 	}
 	return -1;
+}
+
+struct mvMbusResource{
+    unsigned int resource;
+    unsigned int size;
+    unsigned int offset;
+};
+
+static struct mvMbusResource mvMbusResourceAc5[] = {
+    { MV_RESOURCE_MBUS_RUNIT,   SZ_4M + SZ_1M   , 0x80000000},
+    { MV_RESOURCE_MBUS_SWITCH,  SZ_2G - SZ_4    , 0x00000000},
+    { MV_RESOURCE_MBUS_DFX,     SZ_1M           , 0x84000000},
+    { -1, 0, 0 }
+};
+
+static struct mvMbusResource mvMbusResourceAc5x[] = {
+    { MV_RESOURCE_MBUS_RUNIT,   SZ_16M  , 0x7F000000},
+    { MV_RESOURCE_MBUS_SWITCH,  SZ_1G   , 0x80000000},
+    { MV_RESOURCE_MBUS_DFX,     SZ_1M   , 0x94400000},
+    { -1, 0, 0 }
+};
+
+int mvGetSip6ResourceInfo(int resource, int device, struct mv_resource_info *res) {
+
+    int i;
+    u32 devId;
+    struct pci_dev *cpu_dev = NULL;
+
+    static struct mvMbusResource *mvMbusResource = NULL;
+
+    res->start = 0;
+    res->size = 0;
+
+    if(device == MV_MBUS_DRV_DEV_ID_AC5) {
+        mvMbusResource = mvMbusResourceAc5;
+    } else if(device == MV_MBUS_DRV_DEV_ID_AC5X) {
+        mvMbusResource = mvMbusResourceAc5x;
+    } else {
+        return -1;
+    }
+
+    switch (resource) {
+
+        case MV_RESOURCE_DEV_ID:
+            cpu_dev = pci_get_device(0x11ab, PCI_ANY_ID, cpu_dev);
+            if (cpu_dev == NULL){
+            res->start = 0;
+            res->size = 0;
+            return 0;
+            }
+            devId = cpu_dev->device;
+            res->start = (phys_addr_t)devId;
+            res->size = 0;
+            return 0;
+
+        case MV_RESOURCE_MBUS_SWITCH:
+        case MV_RESOURCE_MBUS_RUNIT:
+        case MV_RESOURCE_MBUS_DFX:
+
+            for(i=0; i<(sizeof(mvMbusResourceAc5)/sizeof(struct mvMbusResource)); i++) {
+                if(mvMbusResource[i].resource == resource) {
+                    res->start = mvMbusResource[i].offset;
+                    res->size = mvMbusResource[i].size;
+                    return 0;
+                }
+            }
+            break;
+
+        case MV_RESOURCE_MBUS_SWITCH_IRQ:
+            return mvGetMbusInterrupt(res);
+            break;
+
+        default:
+            break;
+    }
+
+    return -1;
+}
+
+int mvGetDeviceId(void)
+{
+#ifdef __aarch64__
+    struct resource *dev_id_reg_res;
+    void *dev_id_reg;
+    unsigned int dev_id = 0;
+
+    dev_id_reg_res = request_mem_region(CNM_DEV_ID_REG_ADDR, CNM_DEV_ID_REG_SIZE, "CnM Device ID Register");
+    if(dev_id_reg_res) {
+        dev_id_reg = ioremap(CNM_DEV_ID_REG_ADDR, CNM_DEV_ID_REG_SIZE);
+        if(dev_id_reg) {
+            dev_id = ioread32(dev_id_reg);
+            iounmap(dev_id_reg);
+        }
+        release_mem_region(CNM_DEV_ID_REG_ADDR, CNM_DEV_ID_REG_SIZE);
+    }
+
+     sip6_devid = dev_id >> 4;
+     pr_info("raw dev_id is %x\n", sip6_devid);
+    if((dev_id & CNM_DEV_ID_VAL_MASK) == CNM_DEV_ID_VAL_AC5) {
+        pr_info("Detected AC5, DEV ID = %x\n",(dev_id & CNM_DEV_ID_VAL_MASK));
+        return MV_MBUS_DRV_DEV_ID_AC5;
+    } else if((dev_id & CNM_DEV_ID_VAL_MASK) == CNM_DEV_ID_VAL_AC5X) {
+        pr_info("Detected AC5X, DEV ID = %x\n",(dev_id & CNM_DEV_ID_VAL_MASK));
+        return MV_MBUS_DRV_DEV_ID_AC5X;
+    } else {
+        pr_info("Detected Unknown Device, DEV ID = %x\n", (dev_id & CNM_DEV_ID_VAL_MASK));
+    }
+#endif
+
+    return MV_MBUS_DRV_DEV_ID_UNKNOWN;
 }
 
