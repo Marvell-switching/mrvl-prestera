@@ -70,7 +70,7 @@ int mvMbusDrvDevId = 0;
 
 static int mvMbusDrv_mmap(struct file * file, struct vm_area_struct *vma)
 {
-	struct mv_resource_info res;
+	struct mv_resource_info res = {0};
 	switch ((int)vma->vm_pgoff) {
 	case MV_RESOURCE_MBUS_RUNIT:
 	case MV_RESOURCE_MBUS_SWITCH:
@@ -114,7 +114,7 @@ static int mvMbusDrv_mmap(struct file * file, struct vm_area_struct *vma)
 
 static ssize_t mvMbusDrv_read(struct file *f, char *buf, size_t siz, loff_t *off)
 {
-	struct mv_resource_info res;
+	struct mv_resource_info res = {0};
 	unsigned long long rv;
 
 #if 0

@@ -25,7 +25,7 @@
 extern "C" {
 #endif /* __cplusplus */
 
-#define CPSS_STREAM_NAME_CNS "CPSS_4.3.5_016"
+#define CPSS_STREAM_NAME_CNS "CPSS_4.3.5_027"
 
 #ifdef __cplusplus
 }
