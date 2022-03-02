@@ -53,7 +53,7 @@ disclaimer.
 *       $Revision: 1 $
 *******************************************************************************/
 #define MV_DRV_NAME     "mvIntDrv"
-#define INT_DRV_VER		"1.17"
+#define INT_DRV_VER     "1.18"
 #define MV_DRV_MAJOR    244
 #define MV_DRV_MINOR    4
 #define MV_DRV_FOPS     mvIntDrv_fops

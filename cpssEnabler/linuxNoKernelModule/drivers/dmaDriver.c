@@ -74,7 +74,7 @@ disclaimer.
 *
 *******************************************************************************/
 #define MV_DRV_NAME     "mvDmaDrv"
-#define MV_DRV_NAME_VERSION "1.38"
+#define MV_DRV_NAME_VERSION "1.39"
 #define MV_DRV_MAJOR	244
 #define MV_DRV_MINOR	3
 #define MV_DRV_FOPS	mvDmaDrv_fops
