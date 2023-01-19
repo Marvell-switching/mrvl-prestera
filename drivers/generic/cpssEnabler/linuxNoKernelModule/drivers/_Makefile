@@ -1,0 +1,4 @@
+# -*-makefile-*-
+
+DRIVER_LIST += nokmDrivers
+DRIVER_DIR_nokmDrivers := $(dir $(lastword $(MAKEFILE_LIST)))
