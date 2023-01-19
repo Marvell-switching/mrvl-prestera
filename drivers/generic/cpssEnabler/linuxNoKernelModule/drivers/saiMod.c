@@ -24,7 +24,9 @@ WARRANTIES OF MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE ARE EXPRESSLY
 DISCLAIMED.  The GPL License provides additional details about this warranty
 disclaimer.
 *******************************************************************************/
+#include <linux/version.h>
 #include <linux/module.h>
+#include <linux/kernel.h>
 #include <linux/netfilter.h>
 #include <net/psample.h>
 #include <linux/uaccess.h>
@@ -128,6 +130,9 @@ static unsigned int sflow_callback(void *priv, struct sk_buff *skb,
     struct sflow_config *sflow = NULL;
     struct dsa_128bit_var *v, *m, *d;
     struct psample_group *group;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,10,0)
+    struct psample_metadata md = {};
+#endif
 
     sflow = (struct sflow_config *)priv;
     if (!sflow) {
@@ -149,7 +154,13 @@ static unsigned int sflow_callback(void *priv, struct sk_buff *skb,
             skb_push(skb, ETH_HLEN);
             // rcu lock is held during call of nf_hook
             group = rcu_dereference(psample_group);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,10,0)
+            md.trunc_size = skb->len;
+            md.in_ifindex = skb->dev->ifindex;
+            psample_sample_packet(group, skb, sflow->ing_rate, &md);
+#else
             psample_sample_packet(group, skb, skb->len, skb->dev->ifindex, 0, sflow->ing_rate);
+#endif
             atomic_inc(&sflow_pkt_ing_cnt);
             skb_pull(skb, ETH_HLEN);
             consume_skb(skb);
@@ -164,7 +175,13 @@ static unsigned int sflow_callback(void *priv, struct sk_buff *skb,
             skb_push(skb, ETH_HLEN);
             // rcu lock is held during call of nf_hook
             group = rcu_dereference(psample_group);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,10,0)
+            md.trunc_size = skb->len;
+            md.out_ifindex = skb->dev->ifindex;
+            psample_sample_packet(group, skb, sflow->egr_rate, &md);
+#else
             psample_sample_packet(group, skb, skb->len, 0, skb->dev->ifindex, sflow->egr_rate);
+#endif
             atomic_inc(&sflow_pkt_egr_cnt);
             skb_pull(skb, ETH_HLEN);
             consume_skb(skb);
@@ -554,13 +571,23 @@ static int sai_proc_open(struct inode *inode, struct file *file)
     return single_open(file, sai_proc_show, NULL);
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,10,0)
+static struct  proc_ops proc_fops =
+{
+    .proc_open		= sai_proc_open,
+    .proc_read		= seq_read,
+    .proc_lseek 	= seq_lseek,
+    .proc_release	= single_release,
+};
+#else
 static struct file_operations proc_fops =
 {
     .open		= sai_proc_open,
     .read		= seq_read,
     .llseek		= seq_lseek,
-    .release	= single_release,
+    .release   	= single_release,
 };
+#endif
 
 static int __init sai_init(void)
 {
