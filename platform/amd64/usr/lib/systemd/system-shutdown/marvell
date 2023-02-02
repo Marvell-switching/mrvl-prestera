@@ -1,0 +1,7 @@
+#!/bin/sh
+
+rmmod mvSai
+rmmod psample
+rmmod mvEthDrv
+rmmod mvIntDrv
+
