@@ -48,6 +48,9 @@ disclaimer.
 *
 *                     read(fd,NULL,X) will wait for irq
 *
+* DEPENDENCIES:
+*
+*       $Revision: 1 $
 *******************************************************************************/
 #define MV_DRV_NAME     "mvIntDrv"
 #define MV_DRV_MAJOR    244
@@ -55,7 +58,6 @@ disclaimer.
 #define MV_DRV_FOPS     mvIntDrv_fops
 #define MV_DRV_POSTINIT mvIntDrv_postInitDrv
 #define MV_DRV_RELEASE  mvIntDrv_releaseDrv
-
 #include "mvDriverTemplate.h"
 
 #include <linux/pci.h>
@@ -577,33 +579,50 @@ static struct file_operations mvIntDrv_fops = {
 	.release = mvIntDrv_release /* A.K.A close */
 };
 
-#if 0
-void mvintdrv_exit(void)
+static int mvintdrv_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 {
-	mvchrdev_cleanup(chrdrv_ctx);
+	int rc;
+
+	dev_info(&pdev->dev, "Probing to PCI device\n");
+
+	rc = pci_enable_device(pdev);
+	if (rc) {
+		dev_err(&pdev->dev, "Fail to enable PCI device, aborting.\n");
+		rc = -ENOMEM;
+	}
+
+	return rc;
 }
 
-int mvintdrv_init(void)
+static void mvintdrv_remove(struct pci_dev *pdev)
 {
-	chrdrv_ctx = mvchrdev_init(MV_DRV_NAME, &mvIntDrv_fops);
-	if (!chrdrv_ctx)
-		return -EIO;
+	dev_info(&pdev->dev, "Unprobing from PCI device\n");
 
 	memset(mvIntDrv_slots, 0, sizeof(mvIntDrv_slots));
-
-	return 0;
+	pci_disable_device(pdev);
 }
-#else
+
+static struct pci_driver mvintdrv_pci_driver = {
+	.name		= MV_DRV_NAME,
+	.probe		= mvintdrv_probe,
+	.remove		= mvintdrv_remove,
+	.driver.pm	= NULL,
+};
 
 static void mvIntDrv_releaseDrv(void)
 {
-              /* will be called whan all descriptors are closed */
+	pci_unregister_driver(&mvintdrv_pci_driver);
 }
 
 static void mvIntDrv_postInitDrv(void)
 {
-              memset(mvIntDrv_slots, 0, sizeof(mvIntDrv_slots));
-              printk(KERN_DEBUG "mvIntDrv major=%d minor=%d\n", major, minor);
-}
+	int rc;
 
-#endif
+	rc = pci_register_driver(&mvintdrv_pci_driver);
+	if (rc)
+		printk(KERN_ERR "%s: Fail to register PCI driver\n",
+		       MV_DRV_NAME);
+
+	memset(mvIntDrv_slots, 0, sizeof(mvIntDrv_slots));
+	printk(KERN_DEBUG "mvIntDrv major=%d minor=%d\n", major, minor);
+}
