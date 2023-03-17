@@ -162,7 +162,7 @@ enum {
 
 /* Configurable constants */
 #define DRV_NAME "mvppnd_netdev"
-#define MAX_NETDEVS (2 << 8)
+#define MAX_NETDEVS (2 << 10)
 #define DEF_ATU_WIN_AC5X 3
 
 /* How long to wait for SDMA to take ownership of a descriptor */
