@@ -71,13 +71,19 @@ disclaimer.
 
 static int mvIntDrvNumOpened = 0;
 
+enum irq_slot_state {
+	IRQ_SLOT_STATE_UNALLOCATED,
+	IRQ_SLOT_STATE_ALLOCATED,
+	IRQ_SLOT_STATE_READY_FOR_REALLOCATION /* after user-space termination, ready for quick re-allocation */
+};
+
 struct interrupt_slot {
-	int			used;
 	atomic_t		depth; /* keep track of enable/disable */
 	unsigned int		irq;
 	struct semaphore	sem; /* The semaphore on which the user waits */
 	struct semaphore	close_sem; /* Sync disconnect with read */
 	struct tasklet_struct	tasklet;
+	enum irq_slot_state	state;
 };
 
 /* To hold list of devices we enabled MSI on */
@@ -92,6 +98,7 @@ struct mvintdrv_file_priv {
 
 #define MAX_INTERRUPTS 32
 static struct interrupt_slot mvIntDrv_slots[MAX_INTERRUPTS];
+static bool msi_used;
 
 static int find_interrupt_slot(unsigned int irq, bool warn)
 {
@@ -100,7 +107,7 @@ static int find_interrupt_slot(unsigned int irq, bool warn)
 
 	for (slot = 0; slot < MAX_INTERRUPTS; slot++) {
 		sl = &(mvIntDrv_slots[slot]);
-		if (sl->irq == irq)
+		if ( (sl->irq == irq) && (sl->state == IRQ_SLOT_STATE_ALLOCATED) )
 			return slot;
 	}
 
@@ -118,11 +125,13 @@ static irqreturn_t prestera_tl_ISR(int irq, void *tl)
 
 	BUG_ON(!sl);
 
-	atomic_dec(&sl->depth);
+	if (unlikely((sl->state == IRQ_SLOT_STATE_ALLOCATED))) /* handle last interrupt after process termination */
+		atomic_dec(&sl->depth);
 	/* Disable the interrupt vector */
 	disable_irq_nosync(irq);
 	/* Enqueue the PP task BH in the tasklet */
-	tasklet_hi_schedule((struct tasklet_struct *)tl);
+	if (unlikely((sl->state == IRQ_SLOT_STATE_ALLOCATED))) /* handle last interrupt after process termination */
+		tasklet_hi_schedule((struct tasklet_struct *)tl);
 
 	return IRQ_HANDLED;
 }
@@ -147,9 +156,27 @@ static unsigned int alloc_interrupt_slot(unsigned int irq)
 	int slot;
 
 	for (slot = 0; slot < MAX_INTERRUPTS; slot++)
-		if (!mvIntDrv_slots[slot].used) {
+		if ( (mvIntDrv_slots[slot].state == IRQ_SLOT_STATE_READY_FOR_REALLOCATION) &&
+		     (mvIntDrv_slots[slot].irq == irq) ) {
+			/* Interrupt was already allocated to a killed process. Just reuse it without requesting
+			   IRQ again. IRQ is already disabled so no need to disable it now: */
 			sl = &(mvIntDrv_slots[slot]);
-			sl->used = 1;
+			sl->irq = irq;
+			pr_info("Performing irq %d reallocation...\n", sl->irq);
+			sema_init(&sl->sem, 0);
+			sema_init(&sl->close_sem, 0);
+			up(&sl->close_sem);
+			tasklet_init(&sl->tasklet, mvPresteraBh,
+				     (unsigned long)sl);
+			atomic_set(&sl->depth, -1);
+			sl->state = IRQ_SLOT_STATE_ALLOCATED;
+			return slot;
+
+		}
+
+	for (slot = 0; slot < MAX_INTERRUPTS; slot++)
+		if (mvIntDrv_slots[slot].state == IRQ_SLOT_STATE_UNALLOCATED) {
+			sl = &(mvIntDrv_slots[slot]);
 			sl->irq = irq;
 			sema_init(&sl->sem, 0);
 			sema_init(&sl->close_sem, 0);
@@ -162,19 +189,21 @@ static unsigned int alloc_interrupt_slot(unsigned int irq)
 				      irq);
 			atomic_set(&sl->depth, -1);
 			disable_irq(irq);
+			sl->state = IRQ_SLOT_STATE_ALLOCATED;
 			return slot;
 		}
 
 	return MAX_INTERRUPTS;
 }
 
-static void synch_irq_state(struct interrupt_slot *sl)
+static void synch_irq_state(struct interrupt_slot *sl, int target_value)
 {
-	while (atomic_read(&sl->depth) < 0) {
+	while (atomic_read(&sl->depth) < (target_value < 0 ? target_value : 0)) {
 		atomic_inc(&sl->depth);
 		enable_irq(sl->irq);
 	}
-	while (atomic_read(&sl->depth)) {
+	
+	while (atomic_read(&sl->depth) > (target_value > 0 ? target_value : 0)) {
 		atomic_dec(&sl->depth);
 		disable_irq(sl->irq);
 	}
@@ -195,13 +224,19 @@ static void free_interrupt_slot(int slot)
 	down(&sl->close_sem);
 	/* In inconsistent state (ex race between disable_irq in ISR and
 	   disable_irq in release event) synch to stable state before freeing
-	   the IRQ */
-	synch_irq_state(sl);
+	   the IRQ. IRQ must be disabled at the end. */
+	synch_irq_state(sl, -1);
 	up(&sl->close_sem);
-	free_irq(sl->irq, (void*)&(sl->tasklet));
-	tasklet_kill(&(sl->tasklet));
-	sl->used = 0;
-	sl->irq = 0;
+	if (msi_used) { /* MSI wil BUG() the kernel unless free_irq() is called */
+		free_irq(sl->irq, (void*)&(sl->tasklet));
+		tasklet_kill(&(sl->tasklet));
+		sl->state = IRQ_SLOT_STATE_UNALLOCATED;
+		sl->irq = 0;
+	} else {
+		pr_info("Leaving irq %d ready for reallocation...\n", sl->irq);
+		tasklet_kill(&(sl->tasklet));
+		sl->state = IRQ_SLOT_STATE_READY_FOR_REALLOCATION;
+	}
 }
 
 static int intConnect(unsigned int irq)
@@ -250,6 +285,7 @@ static int mvintdrv_pdev_enable_msi(struct pci_dev *pdev)
 {
 	int rc;
 
+	msi_used = true;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
 	dev_info(&pdev->dev, "Enabling MSI, legacy IRQ number is %d\n",
 		 pci_irq_vector(pdev, 0));
@@ -281,6 +317,7 @@ static int mvintdrv_enable_msi(struct file *f, int domain, unsigned int bus,
 	struct mvintdrv_pci_dev *mv_pdev;
 	struct pci_dev *pdev;
 
+	msi_used = true;
 	pdev = pci_get_domain_bus_and_slot(domain, bus, PCI_DEVFN(dev, func));
 	if (pdev) {
 		struct mvintdrv_file_priv *priv;
@@ -507,7 +544,7 @@ static ssize_t mvIntDrv_read(struct file *f, char *buf, size_t siz, loff_t *off)
 		return -EINVAL;
 
 	sl = &(mvIntDrv_slots[slot]);
-	if (!sl->used)
+	if (sl->state != IRQ_SLOT_STATE_ALLOCATED)
 		return -EINVAL;
 
 	/* Enable the interrupt vector */
@@ -552,7 +589,8 @@ static int mvIntDrv_release(struct inode *inode, struct file *file)
 
 		for (slot = 0; slot < MAX_INTERRUPTS; slot++) {
 			sl = &(mvIntDrv_slots[slot]);
-			if (!sl->used)
+			/*if (!sl->used)*/
+			if (sl->state != IRQ_SLOT_STATE_ALLOCATED)
 				continue;
 			/* free_interrupt_slot assumes that IRQ state is disabled and we are cool
 			 * with that since in both cases, waiting for interrupt or servicing an
