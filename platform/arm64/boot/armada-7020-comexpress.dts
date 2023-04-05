@@ -22,8 +22,8 @@
 	};
 
 	aliases {
-		ethernet0 = &cp0_eth0;
-		ethernet1 = &cp0_eth1;
+		ethernet1 = &cp0_eth0;
+		ethernet0 = &cp0_eth1;
 	};
 };
 
