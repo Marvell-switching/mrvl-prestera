@@ -136,6 +136,7 @@ void prt_msi_state(char *msg, unsigned bus, unsigned device, unsigned func)
 						pdev->msi_enabled
 						);
 				}
+			pci_dev_put(pdev);
 		}
 }
 
@@ -475,6 +476,8 @@ static ssize_t mvIntDrv_write(struct file *f, const char *buf, size_t siz, loff_
 			pci_read_config_dword(pdev, pdev->msi_cap + PCI_MSI_ADDRESS_LO,
 				      &msiaddr);
 			return msiaddr ? 0 : -EINVAL;
+
+			pci_dev_put(pdev);
 		}
 
 
@@ -528,6 +531,7 @@ static ssize_t mvIntDrv_write(struct file *f, const char *buf, size_t siz, loff_
 			prt_msi_state("write after msi enable already", 2, 0 ,0);
 			pci_read_config_dword(pdev, pdev->msi_cap + PCI_MSI_ADDRESS_LO,
 				      &msiaddr);
+			pci_dev_put(pdev);
 			return msiaddr ? 0 : -EINVAL;
 
 			return 0;
@@ -542,6 +546,7 @@ static ssize_t mvIntDrv_write(struct file *f, const char *buf, size_t siz, loff_
 
 		prt_msi_state("write after msi enable", 1, 0 ,0);
 		prt_msi_state("write after msi enable", 2, 0 ,0);
+		pci_dev_put(pdev);
 
 		return rc;
 	}
@@ -676,7 +681,8 @@ static int mvIntDrv_release(struct inode *inode, struct file *file)
 
 	for (i=0; i<2; i++) {
 			pdev = pdevs[i];
-			pci_dev_put(pdev);
+			if (pdev)
+				pci_dev_put(pdev);
 		}
 	}
 
