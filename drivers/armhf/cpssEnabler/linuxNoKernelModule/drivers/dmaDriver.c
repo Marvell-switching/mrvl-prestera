@@ -259,7 +259,7 @@ static void mvDmaDrv_free_dma_block(struct dma_mapping *m)
 static int mvDmaDrv_mmap(struct file *file, struct vm_area_struct *vma)
 {
 	struct dma_mapping *m = (struct dma_mapping *)file->private_data;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,11,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,11,0) && LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0)
 	int (*dma_configure)(struct device *dev);
 	int ret;
 
@@ -296,7 +296,7 @@ static int mvDmaDrv_mmap(struct file *file, struct vm_area_struct *vma)
 
 		/* don't config dma_ops in case of no-dev, or for platdrv_dev */
 		if (m->dev && !platdrv_dev) {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,11,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,11,0) && LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0)
 		/* The new DMA framework, that was added in 4.11 (compared to
  		 * 4.4), does not initiate each PCI dev as DMA-enabled by
  		 * default (dev->dma_ops is set to dummy_dma_ops), so need to
@@ -330,7 +330,7 @@ static int mvDmaDrv_mmap(struct file *file, struct vm_area_struct *vma)
 			dev_info(m->dev, "allocating for device %p %s\n",
 				 m->dev, m->dev->kobj.name);
 		}
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,11,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,11,0) && LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0)
         else if (!m->dev) {
             printk("m->dev is not set\n");
             return -ENXIO;
