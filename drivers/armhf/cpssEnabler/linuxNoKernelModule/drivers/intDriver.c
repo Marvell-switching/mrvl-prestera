@@ -475,9 +475,8 @@ static ssize_t mvIntDrv_write(struct file *f, const char *buf, size_t siz, loff_
 			prt_msi_state("write after msi enable already", 2, 0 ,0);
 			pci_read_config_dword(pdev, pdev->msi_cap + PCI_MSI_ADDRESS_LO,
 				      &msiaddr);
-			return msiaddr ? 0 : -EINVAL;
-
 			pci_dev_put(pdev);
+			return msiaddr ? 0 : -EINVAL;
 		}
 
 
