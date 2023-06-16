@@ -69,31 +69,28 @@ disclaimer.
 *		status = "okay";
 *	};
 *
-* DEPENDENCIES:
-*	$Revision: 31 $
-*
 *******************************************************************************/
 #define MV_DRV_NAME     "mvDmaDrv"
-#define MV_DRV_MAJOR	244
-#define MV_DRV_MINOR	3
-#define MV_DRV_FOPS	mvDmaDrv_fops
-#define MV_DRV_POSTINIT	mvDmaDrv_postInitDrv
-#define MV_DRV_RELEASE	mvDmaDrv_releaseDrv
-
-#if defined(CONFIG_OF)
-#define SUPPORT_PLATFORM_DEVICE
-#endif
 
 #include "mvDriverTemplate.h"
 
 #include <linux/pci.h>
 #include <linux/dma-mapping.h>
 #include <linux/kallsyms.h>
+#include <linux/math64.h>
+
+#if (LINUX_VERSION_CODE > KERNEL_VERSION(3,14,79))
+#if defined(CONFIG_OF)
+#define SUPPORT_PLATFORM_DEVICE
+#endif
+#endif
+
 #if defined(SUPPORT_PLATFORM_DEVICE)
 #include <linux/platform_device.h>
+#if (LINUX_VERSION_CODE > KERNEL_VERSION(3,14,79))
 #include <linux/of_reserved_mem.h>
 #endif
-#include <linux/math64.h>
+#endif
 
 #ifdef MTS_BUILD
 #define LINUX_VMA_DMABASE 0x19000000UL
@@ -113,12 +110,14 @@ disclaimer.
 #define LINUX_VMA_DMABASE 0x19000000UL
 #endif /* LINUX_VMA_DMABASE */
 
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(3,6,0))
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(2,6,11)) || !defined(SUPPORT_PLATFORM_DEVICE)
 #define MMAP_USE_REMAP_PFN_RANGE
 #endif
 
 #define MV_DMA_ALLOC_FLAGS GFP_DMA32 | GFP_NOFS
 
+/* Character device context */
+static struct mvchrdev_ctx *chrdrv_ctx;
 /* Did we successfully registered as platform driver? zero means yes */
 #ifdef SUPPORT_PLATFORM_DEVICE
 static u8 platdrv_registered;
@@ -143,10 +142,10 @@ static void free_dma_block(struct dma_mapping *m)
 		return;
 
 	printk(KERN_INFO "%s: dma_free_coherent(%p, 0x%lx, %p, 0x%llx)\n",
-	       MV_DRV_NAME, m->dev ? m->dev : mvDrv_device,
+	       MV_DRV_NAME, m->dev ? m->dev : chrdrv_ctx->dev,
 	       (unsigned long)m->size, m->virt, (unsigned long long)m->dma);
 
-	dma_free_coherent(m->dev ? m->dev : mvDrv_device, m->size, m->virt,
+	dma_free_coherent(m->dev ? m->dev : chrdrv_ctx->dev, m->size, m->virt,
 			  m->dma);
 }
 
@@ -160,6 +159,7 @@ static int mvDmaDrv_mmap(struct file *file, struct vm_area_struct *vma)
 #endif
 	u64 aligned = 0;
 
+#if (LINUX_VERSION_CODE > KERNEL_VERSION(3,14,79))
 	if (!m->dev && !platdrv_dev) {
 		printk(KERN_ERR "%s: Nither PCI, nor Platform device is registered, cannot mmap\n",
 		       MV_DRV_NAME);
@@ -168,6 +168,7 @@ static int mvDmaDrv_mmap(struct file *file, struct vm_area_struct *vma)
 
 	if (!m->dev && platdrv_dev)
 		m->dev = platdrv_dev;
+#endif
 
 	dev_info(m->dev, "%s(file=%p) data=%p LINUX_VMA_DMABASE=0x%lx\n",
 		 __func__, file, m, LINUX_VMA_DMABASE);
@@ -190,6 +191,7 @@ static int mvDmaDrv_mmap(struct file *file, struct vm_area_struct *vma)
 			shared_dmaBlock = m;
 		}
 
+#if (LINUX_VERSION_CODE > KERNEL_VERSION(3,14,79))
 		/* don't config dma_ops in case of no-dev, or for platdrv_dev */
 		if (m->dev && !platdrv_dev) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,11,0)
@@ -226,7 +228,7 @@ static int mvDmaDrv_mmap(struct file *file, struct vm_area_struct *vma)
 			dev_info(m->dev, "allocating for device %p %s\n",
 				 m->dev, m->dev->kobj.name);
 		}
-
+#endif
 		m->size = (size_t)(vma->vm_end - vma->vm_start);
 
 		m->virt = dma_alloc_coherent(m->dev, m->size, &(m->dma),
@@ -247,7 +249,12 @@ static int mvDmaDrv_mmap(struct file *file, struct vm_area_struct *vma)
 		   3. Alloc original size (0x200000)
 		   4. free (2)
 		   5. Check if aligned */
+
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(3,15,0))
+		aligned = (m->dma % m->size);
+#else
 		div64_u64_rem(m->dma, m->size, &aligned);
+#endif
 		if (aligned) {
 			struct dma_mapping m_1 = *m;
 			m_1.size = m->size - aligned;
@@ -275,8 +282,11 @@ static int mvDmaDrv_mmap(struct file *file, struct vm_area_struct *vma)
 					(unsigned)m->size);
 				return -ENXIO;
 			}
-
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(3,15,0))
+			aligned = (m->dma % m->size);
+#else
 			div64_u64_rem(m->dma, m->size, &aligned);
+#endif
 			if (aligned) {
 				dev_err(m->dev,
 					"dma_alloc_coherent failed to allocate aligned size of 0x%x for phys0x%lx\n",
@@ -467,8 +477,10 @@ static struct file_operations mvDmaDrv_fops = {
 	.release= mvDmaDrv_release /* A.K.A close */
 };
 
-static void mvDmaDrv_releaseDrv(void)
+void mvdmadrv_exit(void)
 {
+	mvchrdev_cleanup(chrdrv_ctx);
+
 #ifdef SUPPORT_PLATFORM_DEVICE
 	if (platdrv_registered)
 		platform_driver_unregister(&mvdmadrv_platform_driver);
@@ -479,11 +491,17 @@ static void mvDmaDrv_releaseDrv(void)
 		kfree(shared_dmaBlock);
 	}
 }
-static void mvDmaDrv_postInitDrv(void)
+int mvdmadrv_init(void)
 {
 #ifdef SUPPORT_PLATFORM_DEVICE
 	int err;
+#endif
 
+	chrdrv_ctx = mvchrdev_init(MV_DRV_NAME, &mvDmaDrv_fops);
+	if (!chrdrv_ctx)
+		return -EIO;
+
+#ifdef SUPPORT_PLATFORM_DEVICE
 	err = platform_driver_register(&mvdmadrv_platform_driver);
 	if (err)
 		printk(KERN_ERR "%s: Fail to register platform driver\n",
@@ -492,5 +510,5 @@ static void mvDmaDrv_postInitDrv(void)
 		platdrv_registered = 1;
 #endif
 
-	printk(KERN_DEBUG "%s: major=%d minor=%d\n", MV_DRV_NAME, major, minor);
+	return 0;
 }

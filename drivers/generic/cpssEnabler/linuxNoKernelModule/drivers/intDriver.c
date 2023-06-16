@@ -48,16 +48,8 @@ disclaimer.
 *
 *                     read(fd,NULL,X) will wait for irq
 *
-* DEPENDENCIES:
-*
-*       $Revision: 1 $
 *******************************************************************************/
 #define MV_DRV_NAME     "mvIntDrv"
-#define MV_DRV_MAJOR    244
-#define MV_DRV_MINOR    4
-#define MV_DRV_FOPS     mvIntDrv_fops
-#define MV_DRV_POSTINIT mvIntDrv_postInitDrv
-#define MV_DRV_RELEASE  mvIntDrv_releaseDrv
 #include "mvDriverTemplate.h"
 
 #include <linux/pci.h>
@@ -67,7 +59,7 @@ disclaimer.
 #include <linux/list.h>
 
 /* Character device context */
-/* static struct mvchrdev_ctx *chrdrv_ctx; */
+static struct mvchrdev_ctx *chrdrv_ctx;
 
 static int mvIntDrvNumOpened = 0;
 
@@ -202,7 +194,7 @@ static void synch_irq_state(struct interrupt_slot *sl, int target_value)
 		atomic_inc(&sl->depth);
 		enable_irq(sl->irq);
 	}
-	
+
 	while (atomic_read(&sl->depth) > (target_value > 0 ? target_value : 0)) {
 		atomic_dec(&sl->depth);
 		disable_irq(sl->irq);
@@ -589,7 +581,6 @@ static int mvIntDrv_release(struct inode *inode, struct file *file)
 
 		for (slot = 0; slot < MAX_INTERRUPTS; slot++) {
 			sl = &(mvIntDrv_slots[slot]);
-			/*if (!sl->used)*/
 			if (sl->state != IRQ_SLOT_STATE_ALLOCATED)
 				continue;
 			/* free_interrupt_slot assumes that IRQ state is disabled and we are cool
@@ -617,50 +608,18 @@ static struct file_operations mvIntDrv_fops = {
 	.release = mvIntDrv_release /* A.K.A close */
 };
 
-static int mvintdrv_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
+void mvintdrv_exit(void)
 {
-	int rc;
-
-	dev_info(&pdev->dev, "Probing to PCI device\n");
-
-	rc = pci_enable_device(pdev);
-	if (rc) {
-		dev_err(&pdev->dev, "Fail to enable PCI device, aborting.\n");
-		rc = -ENOMEM;
-	}
-
-	return rc;
+	mvchrdev_cleanup(chrdrv_ctx);
 }
 
-static void mvintdrv_remove(struct pci_dev *pdev)
+int mvintdrv_init(void)
 {
-	dev_info(&pdev->dev, "Unprobing from PCI device\n");
+	chrdrv_ctx = mvchrdev_init(MV_DRV_NAME, &mvIntDrv_fops);
+	if (!chrdrv_ctx)
+		return -EIO;
 
 	memset(mvIntDrv_slots, 0, sizeof(mvIntDrv_slots));
-	pci_disable_device(pdev);
-}
 
-static struct pci_driver mvintdrv_pci_driver = {
-	.name		= MV_DRV_NAME,
-	.probe		= mvintdrv_probe,
-	.remove		= mvintdrv_remove,
-	.driver.pm	= NULL,
-};
-
-static void mvIntDrv_releaseDrv(void)
-{
-	pci_unregister_driver(&mvintdrv_pci_driver);
-}
-
-static void mvIntDrv_postInitDrv(void)
-{
-	int rc;
-
-	rc = pci_register_driver(&mvintdrv_pci_driver);
-	if (rc)
-		printk(KERN_ERR "%s: Fail to register PCI driver\n",
-		       MV_DRV_NAME);
-
-	memset(mvIntDrv_slots, 0, sizeof(mvIntDrv_slots));
-	printk(KERN_DEBUG "mvIntDrv major=%d minor=%d\n", major, minor);
+	return 0;
 }
