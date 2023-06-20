@@ -49,17 +49,10 @@ disclaimer.
 *                               MAP_SHARED, fd,
 *                               (off_t)(MV_RESOURCE_MBUS_RUNIT << SYSTEM_PAGE_SHIFT));
 *
-* DEPENDENCIES:
-*
-*       $Revision: 1 $
 *******************************************************************************/
 #if defined(CONFIG_OF)
 
-#define MV_DRV_NAME     "mvMbusDrv"
-#define MV_DRV_MAJOR    244
-#define MV_DRV_MINOR    5
-#define MV_DRV_FOPS     mvMbusDrv_fops
-#define MV_DRV_POSTINIT mvMbusDrv_postInitDrv
+#define MV_DRV_NAME "mvMbusDrv"
 
 #include "mvDriverTemplate.h"
 
@@ -67,6 +60,9 @@ disclaimer.
 #include <linux/of.h>
 
 #include "mvResources.h"
+
+/* Character device context */
+static struct mvchrdev_ctx *chrdrv_ctx;
 
 int mvMbusDrvDevId = 0;
 
@@ -80,8 +76,10 @@ static int mvMbusDrv_mmap(struct file * file, struct vm_area_struct *vma)
 	case MV_RESOURCE_MBUS_DRAGONITE_ITCM:
 	case MV_RESOURCE_MBUS_DRAGONITE_DTCM:
 	case MV_RESOURCE_MBUS_PSS_PORTS:
-        if((mvMbusDrvDevId == MV_MBUS_DRV_DEV_ID_AC5) || 
-            (mvMbusDrvDevId == MV_MBUS_DRV_DEV_ID_AC5X)) {
+		if((mvMbusDrvDevId == CNM_DEV_ID_VAL_AC5) || 
+		   (mvMbusDrvDevId == CNM_DEV_ID_VAL_AC5X) ||
+		   (mvMbusDrvDevId == CNM_DEV_ID_VAL_IML) || 
+		   (mvMbusDrvDevId == CNM_DEV_ID_VAL_IMM)) {
 		    if (mvGetSip6ResourceInfo((int)vma->vm_pgoff, mvMbusDrvDevId, &res) < 0)
 			    return -ENXIO;
         } else {
@@ -124,8 +122,10 @@ static ssize_t mvMbusDrv_read(struct file *f, char *buf, size_t siz, loff_t *off
 #endif
 	if (siz < sizeof(rv))
 		return -EINVAL;
-    if((mvMbusDrvDevId == MV_MBUS_DRV_DEV_ID_AC5) || 
-        (mvMbusDrvDevId == MV_MBUS_DRV_DEV_ID_AC5X)) {
+	if((mvMbusDrvDevId == CNM_DEV_ID_VAL_AC5) || 
+	   (mvMbusDrvDevId == CNM_DEV_ID_VAL_AC5X) ||
+	   (mvMbusDrvDevId == CNM_DEV_ID_VAL_IML) || 
+		(mvMbusDrvDevId == CNM_DEV_ID_VAL_IMM)) {
 		if (mvGetSip6ResourceInfo(((int)f->f_pos) & MV_RESOURCE_ID_MASK, mvMbusDrvDevId, &res) < 0)
 			return -ENXIO;
     } else {
@@ -169,10 +169,20 @@ static struct file_operations mvMbusDrv_fops = {
 	.release        = mvMbusDrv_release, /* A.K.A close */
 };
 
-static void mvMbusDrv_postInitDrv(void)
+void mvmbusdrv_exit(void)
 {
-	printk(KERN_DEBUG "mvMbusDrv major=%d minor=%d\n", major, minor);
-	mvMbusDrvDevId = mvGetDeviceId();
+	mvchrdev_cleanup(chrdrv_ctx);
+}
+
+int mvmbusdrv_init(void)
+{
+	chrdrv_ctx = mvchrdev_init("mvMbusDrv", &mvMbusDrv_fops);
+	if (!chrdrv_ctx)
+		return -EIO;
+
+	mvMbusDrvDevId = mvGetDeviceId() & CNM_DEV_ID_VAL_MASK;
+
+	return 0;
 }
 
 #endif /* CONFIG_OF */

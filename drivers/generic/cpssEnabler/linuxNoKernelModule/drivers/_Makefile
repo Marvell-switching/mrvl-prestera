@@ -2,3 +2,21 @@
 
 DRIVER_LIST += nokmDrivers
 DRIVER_DIR_nokmDrivers := $(dir $(lastword $(MAKEFILE_LIST)))
+
+HOST=$(shell hostname)
+PWD=$(shell pwd)
+B=$(shell echo "\#define BUILD_SOURCE \"${USER}@${HOST}:${PWD}\"" > cpssEnabler/mainExtDrv/src/gtExtDrv/linuxNoKernelModule/drivers/srcversion.h)
+$(info ${B})
+
+ISGIT := $(shell git rev-parse --git-dir 2> /dev/null)
+ifneq ($(ISGIT),.git)
+$(warning Not a git directory, omitting git commit ID)
+MODULE_VERSION="N/A"
+else
+GIT_HASH=$(shell git log --oneline -1)
+DIRTY=$(shell git status|grep "Changes not staged for commit"|wc -l)
+MODULE_VERSION=${GIT_HASH} (dirty=$(DIRTY))
+endif
+
+A=$(shell echo "\#define GIT_HASH \"${MODULE_VERSION}\"" >> cpssEnabler/mainExtDrv/src/gtExtDrv/linuxNoKernelModule/drivers/srcversion.h)
+$(info ${A})

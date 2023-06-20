@@ -31,8 +31,6 @@ disclaimer.
 *
 * @author Yuval Shaia <yshaia@marvell.com>
 *
-* @version 1
-*
 * Usage:
 *	u32 offset, dma;
 *	int fd, flags;
@@ -96,30 +94,30 @@ disclaimer.
 *
 *******************************************************************************/
 
-#if defined(CONFIG_OF)
-#define SUPPORT_PLATFORM_DEVICE
-#endif
-
-#define MV_DRV_NAME     "mvdma"
-#define MV_DRV_MAJOR	244
-#define MV_DRV_MINOR	3
-#define MV_DRV_FOPS	mvdma_fops
-#define MV_DRV_POSTINIT	mvdma_postinitdrv
-#define MV_DRV_RELEASE	mvdma_releasedrv
+#define MV_DRV_NAME "mvdma"
 
 #include "mvDriverTemplate.h"
 
+#include <linux/version.h>
 #include <linux/pci.h>
 #include <linux/dma-mapping.h>
 #include <linux/kallsyms.h>
-#if defined(SUPPORT_PLATFORM_DEVICE)
-#include <linux/platform_device.h>
-#endif
-#include <linux/of_reserved_mem.h>
 #include <linux/list.h>
 #include <linux/debugfs.h>
+#include <linux/sched.h>
 
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(3,6,0))
+#if (LINUX_VERSION_CODE > KERNEL_VERSION(3,14,79))
+#if defined(CONFIG_OF)
+#include <linux/platform_device.h>
+#define SUPPORT_PLATFORM_DEVICE
+#endif
+#endif
+
+#if (LINUX_VERSION_CODE > KERNEL_VERSION(3,19,8))
+#include <linux/of_reserved_mem.h>
+#endif
+
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(2,6,11)) || !defined(SUPPORT_PLATFORM_DEVICE)
 #define MMAP_USE_REMAP_PFN_RANGE
 #endif
 
@@ -153,6 +151,9 @@ struct file_desc {
 	int pid;
 };
 
+/* Character device context */
+static struct mvchrdev_ctx *mvdma_ctx;
+
 /* Global driver list of dev_mappings */
 struct list_head global_dev_mappings;
 /* dev_mappings of the one platform device */
@@ -169,8 +170,7 @@ static void mvdma_add_open_file(struct file *file)
 
 	filed = kzalloc(sizeof(*filed), GFP_KERNEL);
 	if (!filed) {
-		pr_err("%s: Fail to allocate file context\n",
-		       MV_DRV_NAME);
+		dev_err(mvdma_ctx->dev, "Fail to allocate file context\n");
 		return;
 	}
 
@@ -203,8 +203,7 @@ static void mvdma_free_dma_mapping(struct device *dev,
 	BUG_ON(!mapping->dma);
 
 	dev_dbg(dev, "dma_free_coherent size %ld, virt %p, dma 0x%llx",
-		mapping->size, mapping->virt,
-		(unsigned long long)mapping->dma);
+		mapping->size, mapping->virt, (unsigned long long)mapping->dma);
 
 	dma_free_coherent(dev, mapping->size, mapping->virt, mapping->dma);
 }
@@ -213,7 +212,11 @@ static u64 mvdma_reminder(u64 dividend, u64 divisor)
 {
 	u64 remainder;
 
-	div64_u64_rem(dividend, divisor, &remainder);
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(3,15,0))
+		remainder = ((u32)dividend % (u32)divisor);
+#else
+		div64_u64_rem(dividend, divisor, &remainder);
+#endif
 
 	return remainder;
 }
@@ -291,9 +294,6 @@ static struct dev_mappings *mvdma_alloc_dev_mappings(struct device *dev,
 {
 	struct dev_mappings *m;
 
-	if (!dev)
-		return NULL;
-
 	m = kzalloc(sizeof(*m), GFP_KERNEL);
 	if (!m)
 		return NULL;
@@ -328,7 +328,7 @@ static void mvdma_free_dev_mappings(struct dev_mappings *dev_mappings)
 	struct dma_mapping *mapping;
 	struct list_head *p, *q;
 
-	dev_dbg(dev_mappings->dev, "Freeing device mappings\n");
+	dev_dbg(mvdma_ctx->dev, "Freeing device mappings\n");
 
 	list_for_each_safe(p, q, &(dev_mappings->mappings)) {
 		mapping = list_entry(p, struct dma_mapping, list);
@@ -344,7 +344,7 @@ static void mvdma_free_global_devs_mappings(void)
 	struct dev_mappings *dev_mappings;
 	struct list_head *p, *q;
 
-	pr_debug("%s: Freeing global mappings\n", MV_DRV_NAME);
+	dev_dbg(mvdma_ctx->dev, "Freeing global mappings\n");
 
 	list_for_each_safe(p, q, &(global_dev_mappings)) {
 		dev_mappings = list_entry(p, struct dev_mappings,
@@ -428,7 +428,7 @@ static int mvdma_mmap(struct file *file, struct vm_area_struct *vma)
 
 	dev_mappings = (struct dev_mappings *)file->private_data;
 	if (!dev_mappings) {
-		pr_err("%s: mmap with no lseek, aborting\n", MV_DRV_NAME);
+		dev_err(mvdma_ctx->dev, "mmap with no lseek, aborting\n");
 		return -EIO;
 	}
 
@@ -443,7 +443,7 @@ static int mvdma_mmap(struct file *file, struct vm_area_struct *vma)
 
 	/* Gaps are not allowed */
 	if (vma->vm_pgoff > dev_mappings->list_count) {
-		dev_err(dev_mappings->dev,
+		dev_err(mvdma_ctx->dev,
 			"Fail to map to offset %ld (max %ld)\n",
 			vma->vm_pgoff, dev_mappings->list_count);
 		return -EIO;
@@ -463,7 +463,7 @@ static int mvdma_mmap(struct file *file, struct vm_area_struct *vma)
 	/* Save last mapping for later call to 'read()' */
 	dev_mappings->last_mapping = dma_mapping;
 
-	dev_dbg(dev_mappings->dev, "DMA block size %ld, virt %p, dma 0x%llx\n",
+	dev_dbg(mvdma_ctx->dev, "DMA block size %ld, virt %p, dma 0x%llx\n",
 		dma_mapping->size, dma_mapping->virt,
 		(unsigned long long)dma_mapping->dma);
 
@@ -486,17 +486,17 @@ static int mvdma_mmap(struct file *file, struct vm_area_struct *vma)
 		return -ENXIO;
 	}
 
-	dev_dbg(dev_mappings->dev, "remap_pfn_range vm_pgoff 0x%lx succeeds\n",
+	dev_dbg(mvdma_ctx->dev, "remap_pfn_range vm_pgoff 0x%lx succeeds\n",
 		vma->vm_pgoff);
 #else /* MMAP_USE_REMAP_PFN_RANGE */
 	vma->vm_pgoff = 0;
 	rc = dma_mmap_coherent(dev_mappings->dev, vma, dma_mapping->virt,
 			       dma_mapping->dma, dma_mapping->size);
 	if (rc) {
-		dev_err(dev_mappings->dev, "dma_mmap_coherent() failed\n");
+		dev_err(mvdma_ctx->dev, "dma_mmap_coherent() failed\n");
 		return -ENXIO;
 	}
-	dev_dbg(dev_mappings->dev, "dma_mmap_coherent succeeds\n");
+	dev_dbg(mvdma_ctx->dev, "dma_mmap_coherent succeeds\n");
 #endif /* MMAP_USE_REMAP_PFN_RANGE */
 
 	return 0;
@@ -512,7 +512,7 @@ static ssize_t mvdma_read(struct file *file, char *buf, size_t siz, loff_t *off)
 
 	dev_mappings = (struct dev_mappings *)file->private_data;
 	if (!dev_mappings) {
-		pr_err("%s: read with no mmap, aborting\n", MV_DRV_NAME);
+		dev_err(mvdma_ctx->dev, "read with no mmap, aborting\n");
 		return -EIO;
 	}
 
@@ -529,9 +529,9 @@ static ssize_t mvdma_read(struct file *file, char *buf, size_t siz, loff_t *off)
 	if (copy_to_user(buf, &dma, sizeof(dma)))
 		return -EFAULT;
 #else
-	if (copy_to_user(buf, &pdma[1], 4))
+	if (copy_to_user(buf, &pdma[0], 4))
 		return -EFAULT;
-	if (copy_to_user(buf + 4, &pdma[0], 4))
+	if (copy_to_user(buf + 4, &pdma[1], 4))
 		return -EFAULT;
 #endif
 
@@ -540,7 +540,7 @@ static ssize_t mvdma_read(struct file *file, char *buf, size_t siz, loff_t *off)
 
 static int mvdma_open(struct inode *inode, struct file *file)
 {
-	pr_debug("%s: Task %d open file\n", MV_DRV_NAME, current->pid);
+	dev_dbg(mvdma_ctx->dev, "Task %d open file\n", current->pid);
 
 	file->private_data = NULL;
 
@@ -551,9 +551,9 @@ static int mvdma_open(struct inode *inode, struct file *file)
 
 static loff_t mvdma_lseek(struct file *file, loff_t off, int unused)
 {
+	struct dev_mappings *dev_mappings = NULL;
 	unsigned int domain, bus, slot, func;
-	struct dev_mappings *dev_mappings;
-	struct pci_dev *pdev;
+	struct pci_dev *pdev = NULL;
 	int global;
 
 	/**
@@ -573,13 +573,27 @@ static loff_t mvdma_lseek(struct file *file, loff_t off, int unused)
 
 	/* Device tree reservation? */
 	if ((off & 0x0000FFFF) == 0x0000FFFF) {
+plat_dev_alloc:
+		/*
+		 * Below logic is workaround for a case where PP is a platform device & is not
+		 * connected over PCIe, DTS does not contain compatible = "marvell,mv_dma"
+		 * entry and kernel does not support mapping of reserved memory through DTS
+		 *
+		 */
 		if (!platform_dev_mappings) {
-			pr_err("%s: Fail to allocate dev_mappings for platform device\n",
-			       MV_DRV_NAME);
-			return -EIO;
+
+			platform_dev_mappings = mvdma_alloc_dev_mappings(NULL, true);
+			if (!platform_dev_mappings) {
+				dev_err(mvdma_ctx->dev,
+					"Fail to allocate dev_mappings for platform device\n");
+				return -ENOMEM;
+			} else {
+				dev_dbg(mvdma_ctx->dev,
+					"dev_mappings for platform device allocated\n");
+			}
 		}
 
-		pr_debug("%s: Using platform device\n", MV_DRV_NAME);
+		dev_dbg(mvdma_ctx->dev, "Using platform device\n");
 
 		file->private_data = platform_dev_mappings;
 
@@ -594,10 +608,29 @@ static loff_t mvdma_lseek(struct file *file, loff_t off, int unused)
 
 	pdev = pci_get_domain_bus_and_slot(domain, bus, PCI_DEVFN(slot, func));
 	if (!pdev) {
-		pr_err("%s: Fail to find PCI device %d:%d.%d.%d\n",
-		       MV_DRV_NAME, domain, bus, slot, func);
+		dev_err(mvdma_ctx->dev, "Fail to find PCI device %d:%d.%d.%d\n",
+			domain, bus, slot, func);
 		return -EINVAL;
 	}
+	/* TODO: Release pdev when no longer need (pci_dev_put) */
+
+	/* Workaround for CPSS-15827, fall back to DT reserved memory allocation
+	 * in case CMA allocation fails
+	 */
+	{
+		void *v;
+		dma_addr_t d;
+		v = dma_alloc_coherent(&pdev->dev, 0x200000, &d, MV_DMA_ALLOC_FLAGS);
+		if (v) {
+			dma_free_coherent(&pdev->dev, 0x200000, v, d);
+		} else {
+			dev_warn(mvdma_ctx->dev,
+				 "Fail to allocate from CMA, switching to platform device\n");
+			pci_dev_put(pdev);
+			goto plat_dev_alloc;
+		}
+	}
+	/* End of workaround */
 
 	if (global) {
 		dev_mappings = mvdma_find_global_dev_mappings(&(pdev->dev));
@@ -613,8 +646,8 @@ static loff_t mvdma_lseek(struct file *file, loff_t off, int unused)
 
 	file->private_data = dev_mappings;
 
-	pr_debug("%s: Using PCI device %s\n", MV_DRV_NAME,
-		 dev_mappings->dev->kobj.name);
+	dev_dbg(mvdma_ctx->dev, "Using PCI device %s\n",
+		dev_mappings->dev->kobj.name);
 
 	return 0;
 }
@@ -623,7 +656,7 @@ static int mvdma_release(struct inode *inode, struct file *file)
 {
 	struct dev_mappings *dev_mappings;
 
-	pr_debug("%s: Task %d close file\n", MV_DRV_NAME, current->pid);
+	dev_dbg(mvdma_ctx->dev, "Task %d close file\n", current->pid);
 
 	if (file->private_data) {
 		dev_mappings = (struct dev_mappings *)file->private_data;
@@ -640,18 +673,20 @@ static int mvdma_release(struct inode *inode, struct file *file)
 static int mvdma_pdriver_probe(struct platform_device *pdev)
 {
 	int rc;
-
+#if (LINUX_VERSION_CODE > KERNEL_VERSION(3,19,8))
 	rc = of_reserved_mem_device_init(&pdev->dev);
 	if (rc)
 		dev_warn(&pdev->dev,
 			 "Missing memory-region, defaulting to CMA\n");
-
+#endif
 	platform_dev_mappings = mvdma_alloc_dev_mappings(&pdev->dev, true);
 	if (!platform_dev_mappings) {
-		pr_err("%s: Fail to allocate dev_mappings for platform device\n",
-		       MV_DRV_NAME);
+		dev_err(mvdma_ctx->dev,
+			"Fail to allocate dev_mappings for platform device\n");
 		return -ENOMEM;
 	}
+	list_add(&platform_dev_mappings->global_dev_mappings,
+		&(global_dev_mappings));
 
 	dev_info(&pdev->dev, "Platform device driver registered\n");
 
@@ -661,9 +696,9 @@ static int mvdma_pdriver_probe(struct platform_device *pdev)
 static int mvdma_pdriver_remove(struct platform_device *pdev)
 {
 	BUG_ON(!platform_dev_mappings);
-
+#if (LINUX_VERSION_CODE > KERNEL_VERSION(3,19,8))
 	of_reserved_mem_device_release(&pdev->dev);
-
+#endif
 	return 0;
 }
 
@@ -689,13 +724,16 @@ static struct file_operations mvdma_fops = {
 	.release= mvdma_release,
 };
 
-static void mvdma_releasedrv(void)
+void mvdma2_exit(void)
 {
-	debugfs_remove(debugfs_mmaps);
-	debugfs_remove(debugfs_dir);
+	mvchrdev_cleanup(mvdma_ctx);
+
 #if defined(SUPPORT_PLATFORM_DEVICE)
 	platform_driver_unregister(&mvdma_platform_driver);
 #endif
+
+	debugfs_remove(debugfs_mmaps);
+	debugfs_remove(debugfs_dir);
 
 	mvdma_free_global_devs_mappings();
 }
@@ -787,41 +825,76 @@ static int mvdma_debugfs_show(struct seq_file *m, void *v)
 	return 0;
 }
 
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(4,16,0))
+#define DEFINE_SHOW_ATTRIBUTE(__name)						\
+	static int __name ## _open(struct inode *inode, struct file *file)	\
+{										\
+	return single_open(file, __name ## _show, inode->i_private);		\
+}										\
+										\
+static const struct file_operations __name ## _fops = {				\
+	.owner		= THIS_MODULE,						\
+	.open		= __name ## _open,					\
+	.read		= seq_read,						\
+	.llseek		= seq_lseek,						\
+	.release	= single_release,					\
+}
+#endif
+
 DEFINE_SHOW_ATTRIBUTE(mvdma_debugfs);
 
-static void mvdma_postinitdrv(void)
+int mvdma2_init(void)
 {
 #if defined(SUPPORT_PLATFORM_DEVICE)
 	int rc;
-#endif
+#endif //SUPPORT_PLATFORM_DEVICE
+
+	mvdma_ctx = mvchrdev_init(MV_DRV_NAME, &mvdma_fops);
+	if (!mvdma_ctx)
+		return -EIO;
 
 	INIT_LIST_HEAD(&global_dev_mappings);
 	INIT_LIST_HEAD(&opened_files);
-
-#if defined(SUPPORT_PLATFORM_DEVICE)
-	rc = platform_driver_register(&mvdma_platform_driver);
-	if (rc) {
-		pr_err("%s: Fail to register platform driver\n", MV_DRV_NAME);
-		return;
-	}
-#endif
-
+#if defined(CONFIG_DEBUG_FS)
 	debugfs_dir = debugfs_create_dir(MV_DRV_NAME, NULL);
 	if (IS_ERR(debugfs_dir)) {
-		pr_err("%s: Fail to create debugfs directory\n", MV_DRV_NAME);
-		return;
+		dev_err(mvdma_ctx->dev, "Fail to create debugfs directory\n");
+		goto err_mvchrdev;
 	}
 
 	debugfs_mmaps = debugfs_create_file("mmaps", 0444, debugfs_dir, NULL,
 					    &mvdma_debugfs_fops);
 	if (IS_ERR(debugfs_mmaps)) {
-		pr_err("%s: Fail to create debugfs mmaps file\n", MV_DRV_NAME);
-		return;
+		dev_err(mvdma_ctx->dev, "Fail to create debugfs mmaps file\n");
+		goto err_dbgfs_dir;
 	}
+#endif //CONFIG_DEBUG_FS
+#if defined(SUPPORT_PLATFORM_DEVICE)
+	rc = platform_driver_register(&mvdma_platform_driver);
+	if (rc) {
+		dev_err(mvdma_ctx->dev, "Fail to register platform driver\n");
+		goto err_dbgfs_mmap;
+	} else {
+		dev_dbg(mvdma_ctx->dev, "Registered platform driver\n");
+	}
+#endif //SUPPORT_PLATFORM_DEVICE
 
-	pr_debug("%s: major=%d minor=%d\n", MV_DRV_NAME, major, minor);
+	return 0;
+
+#if defined(SUPPORT_PLATFORM_DEVICE)
+err_dbgfs_mmap:
+#if defined(CONFIG_DEBUG_FS)
+	debugfs_remove(debugfs_mmaps);
+#endif //CONFIG_DEBUG_FS
+#endif //SUPPORT_PLATFORM_DEVICE
+
+#if defined(CONFIG_DEBUG_FS)
+err_dbgfs_dir:
+	debugfs_remove(debugfs_dir);
+
+err_mvchrdev:
+#endif //CONFIG_DEBUG_FS
+	mvchrdev_cleanup(mvdma_ctx);
+
+	return -EIO;
 }
-
-MODULE_AUTHOR("Yuval Shaia <yshaia@marvell.com>");
-MODULE_DESCRIPTION("Marvell's Multi DMA driver");
-MODULE_LICENSE("Dual BSD/GPL");

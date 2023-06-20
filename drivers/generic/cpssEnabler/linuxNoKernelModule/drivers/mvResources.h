@@ -33,7 +33,6 @@ disclaimer.
 *
 * DEPENDENCIES:
 *
-*       $Revision: 1 $
 *******************************************************************************/
 #ifndef __mvResources_h__
 #define __mvResources_h__
@@ -67,15 +66,13 @@ int mvGetDeviceId(void);
 #define IOCTL_MV_MBUS_DRV_MAGIC         'M'
 #define IOCTL_MV_MBUS_DRV_SET_DEV_ID    _IOW(IOCTL_MV_MBUS_DRV_MAGIC, 1, int)
 
-#define MV_MBUS_DRV_DEV_ID_UNKNOWN      0
-#define MV_MBUS_DRV_DEV_ID_AC5          1
-#define MV_MBUS_DRV_DEV_ID_AC5X         2
-
 #define CNM_DEV_ID_REG_ADDR         0x7F90004C
 #define CNM_DEV_ID_REG_SIZE         4
 #define CNM_DEV_ID_VAL_AC5          0x000B4000
 #define CNM_DEV_ID_VAL_AC5X         0x00098000
-#define CNM_DEV_ID_VAL_MASK         0x000FF000
+#define CNM_DEV_ID_VAL_IML          0x000A0000
+#define CNM_DEV_ID_VAL_IMM          0x000A2000
+#define CNM_DEV_ID_VAL_MASK         0x000FE000
 
 #endif /* __mvResources_h__ */
 

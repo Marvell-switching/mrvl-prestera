@@ -59,6 +59,8 @@ disclaimer.
 #include <linux/of_irq.h>
 #endif
 
+#define ETH_DRV_VER "1.01"
+
 /* TODO List
 - Complete queue initialization (i.e. when CPSS skip init our queues)
 - Update "implementation" sections in the design document
@@ -172,8 +174,7 @@ static const unsigned long TX_QUEUE_SIZE = 10000;
 static const u16 DEFAULT_NAPI_POLL_WEIGHT = NAPI_POLL_WEIGHT * 4;
 static const u8 MAX_EMPTY_NAPI_POLL = 20;
 static const int RX_THREAD_UDELAY = 5000;
-static const u16 DEFAULT_ATU_WIN = 5;
-static const u16 DEFAULT_ATU_WIN_Xeon = 3;
+static const u16 DEFAULT_ATU_WIN = 4;
 /* MG windows - one for coherent and max 2 for streaming, indexes below */
 static const u8 DEFAULT_MG_WIN = 0xE;
 static const u8 MG_WIN_COHERENT_IDX = 0;
@@ -184,10 +185,10 @@ static const u8 DEFAULT_TX_DSA[] = {0x50, 0x02, 0x10, 0x00, 0x88, 0x08, 0x40,
 				    0x0}; /* Forward */
 /* TX ring size for MAC, DSA, head and all frags */
 static const u16 TX_RING_SIZE = roundup_pow_of_two(MAX_FRAGS + 3);
-static const u16 DEFAULT_RX_RING_SIZE = roundup_pow_of_two(8);
+static const u16 DEFAULT_RX_RING_SIZE = roundup_pow_of_two(128);
 static const u32 DEFAULT_PKT_SZ = 2048; /* Multiplications of 8 */
 static const u32 DEFAULT_TX_QUEUE = 4;
-static const u32 DEFAULT_RX_QUEUES = 0xFF;
+static const u32 DEFAULT_RX_QUEUES = 0xFF; /* default to max for better testing coverage */
 static const u8 CRC_SIZE = 4;
 
 static const u8 DEFAULT_MAC[] = {0x00, 0x50, 0x43, 0x0, 0x0, 0x0};
@@ -219,7 +220,6 @@ enum mvppnd_stats {
 	STATS_RX_TREE1_INTERRUPTS,
 	STATS_NAPI_POLL_CALLS,
 	STATS_NAPI_BURN_BUDGET,
-	STATS_INTERRUPTS_END,
 	STATS_LAST = STATS_NAPI_BURN_BUDGET,
 };
 
@@ -241,7 +241,6 @@ static const char *mvppnd_stats_descs[] = {
 	"RX_TREE1_INTERRUPTS      ",
 	"NAPI_POLL_CALLS          ",
 	"NAPI_BURN_BUDGET         ",
-	"INTERRUPTS END OF FUNC.  ",
 };
 
 struct mvppnd_hw_desc {
@@ -363,7 +362,7 @@ struct mvppnd_dev {
 
 	size_t max_pkt_sz; /* Maximum size of frame, set by sysfs */
 
-	struct mvppnd_ops *ops;
+	struct mvppnd_ops *ops; /* hook callback functions set */
 
 #ifdef MVPPND_DEBUG_REG
 	int print_packets_interval;
@@ -406,13 +405,23 @@ struct device_private_data falcon_private_data = {REG_ADDR_BASE_FALCON};
 struct device_private_data ac5p_private_data = {REG_ADDR_BASE_AC5P};
 struct device_private_data ac5x_private_data = {REG_ADDR_BASE_AC5X};
 
+/* 
+ * netif_receive_skb_list() was only introduced in
+ * kernel 4.19 . Make a naive implementation of
+ * a function which can process a list of skb
+ * and pass them into the stack. The sequencial
+ * invocation of the same function repeatedly for
+ * a list of buffers provides superior cache
+ * performance
+ */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4,19,0)
 static void netif_receive_skb_list(struct list_head *head)
 {
 	struct sk_buff *skb, *next;
 
 	list_for_each_entry_safe(skb, next, head, list) {
-
+		list_del(&skb->list);
+		skb->next = skb->prev = NULL;
 		netif_receive_skb(skb);
 
 	}
@@ -697,6 +706,34 @@ static void mvppnd_init_target_and_control(struct mvppnd_dev *ppdev,
 	*control = base_addr | BIT(31) | 0x0000000e;
 }
 
+/*
+	Check existing CPSS MG window entries
+	If they cover the request MG window mapping
+	then return true
+*/
+static bool mvppnd_is_covered_by_mg(struct mvppnd_dev *ppdev, u8 max_mg_win,
+				    u32 base_addr, u32 size)
+{
+	u32 i;
+	u32 read_base, read_size;
+
+	for (i = 0; i < max_mg_win; i++)
+	{
+		read_base = mvppnd_read_reg(ppdev,
+				REG_ADDR_MG_BASE_ADDR + i *
+				REG_ADDR_MG_BASE_ADDR_OFFSET_FORMULA) & 0xFFFF0000;
+		read_size = mvppnd_read_reg(ppdev,
+				REG_ADDR_MG_SIZE + i *
+				REG_ADDR_MG_SIZE_OFFSET_FORMULA) & 0xFFFF0000;
+
+		if ( (read_base <= base_addr) &&
+		     ( (read_base + read_size) >= (base_addr + size) ) )
+			return true;
+	}
+
+	return false;
+}
+
 static void mvppnd_setup_mg_window(struct mvppnd_dev *ppdev, u8 mg_win,
 				   u32 base_addr, u32 size)
 {
@@ -707,6 +744,9 @@ static void mvppnd_setup_mg_window(struct mvppnd_dev *ppdev, u8 mg_win,
 
 	mvppnd_init_target_and_control(ppdev, &target, &control, base_addr,
 				       size);
+
+	if (mvppnd_is_covered_by_mg(ppdev, mg_win, base_addr, size))
+		return; /* if CPSS already mapped these addresses avoid making another overlapping mapping */
 
 	/* Is oATU needed */
 	if ((ppdev->pdev.pdev) &&
@@ -871,12 +911,12 @@ static inline int cyclic_idx(int c, size_t s)
 	if (c < 0)
 		return s + c;
 
-	return c & (s - 1);
+	return c & (s - 1); /* use bitwise AND as it is faster than modulo (division) */
 }
 
 static inline void cyclic_inc(size_t *c, size_t s)
 {
-	*c = (*c + 1) & (s - 1);
+	*c = (*c + 1) & (s - 1); /* use bitwise AND as it is faster than modulo (division) */
 }
 
 static int mvppnd_queue_enabled(struct mvppnd_dev *ppdev, u32 cmd_reg_addr,
@@ -950,7 +990,7 @@ static int mvppnd_alloc_device_coherent(struct mvppnd_dev *ppdev)
 {
 	size_t i, rx_rings_total_size = 0;
 	dma_addr_t d;
-	size_t size;
+	size_t size, filler_size;
 	void *v;
 
 	ppdev->coherent.buf.size = 0;
@@ -994,24 +1034,32 @@ static int mvppnd_alloc_device_coherent(struct mvppnd_dev *ppdev)
 						      GFP_KERNEL);
 	if (unlikely(!ppdev->coherent.buf.virt)) {
 		dev_err(ppdev->dev,
-			"Fail to allocate %ld bytes of coherent memory\n",
-			ppdev->coherent.buf.size);
+			"Fail to allocate %ld bytes of coherent memory, masks %llx %llx\n",
+			ppdev->coherent.buf.size, *ppdev->dev->dma_mask,
+			ppdev->dev->coherent_dma_mask);
 		return -ENOMEM;
 	}
 
 	/* Make sure address is aligned with the size */
 	size = ppdev->coherent.buf.dma % ppdev->coherent.buf.size;
 	if (size) {
-		dev_dbg(ppdev->dev,
-			"Not aligned (0x%llx, 0x%lx), reallocating\n",
-			ppdev->coherent.buf.dma, ppdev->coherent.buf.size);
+		/* 
+		 * Allocate the difference between the requested
+		 * size and the allocated address misalignment.
+		 * This should make the next allocation start on the
+		 * correct boundary:
+		 */
+		filler_size = ppdev->coherent.buf.size - size;
+		dev_info(ppdev->dev,
+			"Not aligned (0x%llx, 0x%lx), reallocating %lx\n",
+			ppdev->coherent.buf.dma, ppdev->coherent.buf.size, filler_size);
 
 		dma_free_coherent(ppdev->dev,
 				  ppdev->coherent.buf.size,
 				  ppdev->coherent.buf.virt,
 				  ppdev->coherent.buf.dma);
 
-		v = dma_alloc_coherent(ppdev->dev, size, &d,
+		v = dma_alloc_coherent(ppdev->dev, filler_size, &d,
 				       GFP_DMA32 | GFP_NOFS | GFP_KERNEL);
 		ppdev->coherent.buf.virt =
 			dma_alloc_coherent(ppdev->dev,
@@ -1020,8 +1068,8 @@ static int mvppnd_alloc_device_coherent(struct mvppnd_dev *ppdev)
 					   GFP_DMA32 | GFP_NOFS | GFP_KERNEL);
 		if (unlikely(!ppdev->coherent.buf.virt)) {
 			dev_err(ppdev->dev,
-				"Fail to allocate %ld bytes of coherent memory\n",
-				ppdev->coherent.buf.size);
+				"Fail to allocate %ld bytes of coherent memory, phys1 %llx phys2 %llx\n",
+				ppdev->coherent.buf.size, d, ppdev->coherent.buf.dma);
 			return -ENOMEM;
 		}
 
@@ -1030,12 +1078,13 @@ static int mvppnd_alloc_device_coherent(struct mvppnd_dev *ppdev)
 
 	if (ppdev->coherent.buf.dma % ppdev->coherent.buf.size) {
 		dev_err(ppdev->dev,
-			"Fail to allocate aligned coherent buffer, size %ld\n",
-			ppdev->coherent.buf.size);
+			"Fail to allocate aligned coherent buffer, phys %llx filler %llx size %ld masks %llx %llx\n", ppdev->coherent.buf.dma, d,
+			ppdev->coherent.buf.size, *ppdev->dev->dma_mask,
+			ppdev->dev->coherent_dma_mask);
 		return -ENOMEM;
 	}
 
-	dev_dbg(ppdev->dev,"coherent 0x%llx, %llx (0x%lx)\n",
+	dev_info(ppdev->dev,"coherent 0x%llx, %llx (0x%lx)\n",
 		ppdev->coherent.buf.dma, ppdev->coherent.buf.dma +
 		ppdev->coherent.buf.size, ppdev->coherent.buf.size);
 
@@ -1260,7 +1309,7 @@ static int mvppnd_setup_rx_rings(struct mvppnd_dev *ppdev)
 			r->descs[j]->cmd_sts = RX_CMD_BIT_OWN_SDMA |
 					       RX_CMD_BIT_EN_INTR;
 
-			sgb->sizes[0] = ppdev->max_pkt_sz;
+			sgb->sizes[0] = ppdev->max_pkt_sz - DSA_SIZE;
 			sgb->virt = mvppnd_alloc_coherent(ppdev, sgb->sizes[0],
 							  &sgb->mappings[0]);
 
@@ -1295,7 +1344,13 @@ static void mvppnd_destroy_rings(struct mvppnd_dev *ppdev)
 	mvppnd_destroy_tx_ring(ppdev);
 }
 
-/*********** rx ****************************************/
+/*
+ * This function is called by an external kernel module
+ * to provide RX and TX callback hook functions.
+ * If a previous registration of hooks were made,
+ * this will override the previously registered hook
+ * callback functions
+ */
 int mvppnd_register_hooks(struct net_device *ndev, struct mvppnd_ops *ops)
 {
 	struct mvppnd_switch_flow *flow;
@@ -1311,6 +1366,7 @@ int mvppnd_register_hooks(struct net_device *ndev, struct mvppnd_ops *ops)
 }
 EXPORT_SYMBOL(mvppnd_register_hooks);
 
+/*********** rx ****************************************/
 #ifdef MVPPND_DEBUG_DATA_PATH
 static void print_dsa(const char *netdev, const char *dir, u8 *dsa)
 {
@@ -1388,7 +1444,7 @@ static void mvppnd_process_rx_buff(struct mvppnd_dev *ppdev,
 	bool redirect_to_tx = false;
 	struct net_device *ndev;
 	struct vlan_ethhdr veth;
-	char *skb_data, dsa[DSA_SIZE];
+	char *skb_data, dsa[DSA_SIZE]; /* use dsa on stack - faster than dynamic allocation */
 	struct sk_buff *skb;
 	int rx_bytes;
 	u8 istagged;
@@ -1399,6 +1455,10 @@ static void mvppnd_process_rx_buff(struct mvppnd_dev *ppdev,
 
 	rx_bytes = RX_DESC_GET_BYTE_CNT(bc) - CRC_SIZE;
 
+	/*
+	 * if RX callback hook exists, call it and according to the
+	 * return value decide what needs to be done with the packet:
+	 */
 	if (ppdev->ops && ppdev->ops->process_rx) {
 		rc = ppdev->ops->process_rx(ppdev->sdev.flows[0]->ndev, buff,
 					    &rx_bytes, ppdev->max_pkt_sz);
@@ -1438,6 +1498,10 @@ static void mvppnd_process_rx_buff(struct mvppnd_dev *ppdev,
 	ndev = flow->ndev;
 
 	print_dsa(ndev->name, "rx", buff + ETH_ALEN * 2);
+	if ( (rx_bytes < DSA_SIZE) || (rx_bytes > ppdev->max_pkt_sz) ) {
+		WARN_ONCE("Received packet with illegal size %d!!!\n", rx_bytes);
+		return;
+	}
 
 	skb = netdev_alloc_skb(ndev, rx_bytes);
 
@@ -1446,7 +1510,7 @@ static void mvppnd_process_rx_buff(struct mvppnd_dev *ppdev,
 		no_skbs++;
 		return;
 	}
-
+	/* initialize skb closer to allocation when variables are cache hot: */
 	/* Reserved place for DSA */
 	skb_reserve(skb, DSA_SIZE);
 	/* Bit 30 - csum validity */
@@ -1491,13 +1555,13 @@ static void mvppnd_process_rx_buff(struct mvppnd_dev *ppdev,
 
 	skb->protocol = eth_type_trans(skb, skb->dev);
 
-	if (unlikely(redirect_to_tx)) {
+	if (unlikely(redirect_to_tx)) { /* redirect to tx is rarely used */
 		mvppnd_start_xmit(skb, skb->dev);
 		consume_skb(skb);
 		ndev->stats.rx_packets++;
 		ndev->stats.rx_bytes += rx_bytes;
 	} else {
-		list_add_tail(&skb->list, rx_list_ptr);
+		list_add_tail(&skb->list, rx_list_ptr); /* add to list - caller will pass all buffer in one go to the kernel - faster */
 		dev_dbg(ppdev->dev, "netif_receive_skb returns %d\n", rc);
 		ndev->stats.rx_packets++;
 		ndev->stats.rx_bytes += rx_bytes;
@@ -1513,6 +1577,7 @@ static int mvppnd_process_rx_queue(struct mvppnd_dev *ppdev, int queue,
 	struct mvppnd_dma_sg_buf *buff;
 	int done = 0;
 
+	/* called only from NAPI poll context, hence no need for mutex */
 	while (((r->descs[r->descs_ptr]->cmd_sts & RX_CMD_BIT_OWN_SDMA) !=
 	       RX_CMD_BIT_OWN_SDMA) && (done < budget)) {
 
@@ -1528,7 +1593,7 @@ static int mvppnd_process_rx_queue(struct mvppnd_dev *ppdev, int queue,
 		/* Populate skb details and pass to network stack */
 		mvppnd_process_rx_buff(ppdev, buff->virt,
 				       r->descs[r->descs_ptr]->bc,
-				       rx_list_ptr);
+				       rx_list_ptr); /* add buffer to list, caller will pass entire list to kernel - faster */
 
 		/* Pass ownership back to SDMA */
 		r->descs[r->descs_ptr]->cmd_sts = RX_CMD_BIT_OWN_SDMA |
@@ -1555,12 +1620,15 @@ int mvppnd_poll(struct napi_struct *napi, int budget)
 	struct list_head rx_list;
 	size_t queue_idx = 0;
 
-	INIT_LIST_HEAD(&rx_list);
+	while (!ppdev->rx_queues[queue_idx]) { /* skip unused queues */
+		cyclic_inc(&queue_idx, NUM_OF_RX_QUEUES);
+	}
+	INIT_LIST_HEAD(&rx_list); /* list containing all received buffers for passing to kernel in one go - faster */
 
 #ifdef DBG_BUDGET
 	last_budget_pkts = budget;
 	if (budget > max_budget_pkts)
-		max_budget_pkts = budget;
+		max_budget_pkts = budget; /* for debug telemetries only */
 #endif
 
 	/* dev_dbg(&ppdev->pdev->dev, "budget %d\n", budget); */
@@ -1568,6 +1636,14 @@ int mvppnd_poll(struct napi_struct *napi, int budget)
 	pr_err("mvppnd_poll - NAPI poll\n");
 #endif
 	mvppnd_inc_stat(ppdev, STATS_NAPI_POLL_CALLS, 1);
+	/*
+	 * For now just give each queue 1/8 of the NAPI budget,
+	 * but no less than one buffer.
+	 * In the future we will create a sysfs interface which
+	 * will allow the user to specify the exact weight to
+	 * give each queue, which will determine how many buffer
+	 * can be read in one go from the queue:
+	 */
 	queue_budget = budget >> 3;
 	if (!queue_budget)
 		queue_budget = 1;
@@ -1577,8 +1653,8 @@ int mvppnd_poll(struct napi_struct *napi, int budget)
 						     queue_budget,
 						     &rx_list);
 		if (done_queue > 0)
-			num_rx_q_nonempty++;
-		num_rx_q_proc++;
+			num_rx_q_nonempty++; /* record how many reads from queues yielded at least one buffer */
+		num_rx_q_proc++; /* and how many reads were done at all */
 
 		mvppnd_inc_stat(ppdev,
 				STATS_RX_Q0_PACKETS + queue_idx,
@@ -1586,17 +1662,26 @@ int mvppnd_poll(struct napi_struct *napi, int budget)
 
 		done_total += done_queue;
 
-		cyclic_inc(&queue_idx, NUM_OF_RX_QUEUES);
-		while (!ppdev->rx_queues[queue_idx]) {
+		cyclic_inc(&queue_idx, NUM_OF_RX_QUEUES); /* move to next queue */
+		while (!ppdev->rx_queues[queue_idx]) { /* skip unused queues */
 			cyclic_inc(&queue_idx, NUM_OF_RX_QUEUES);
 		}
+		/*
+		 * if we cycled through all of the queues
+		 * and at least one queue yielded buffers,
+		 * then do another round, as due to the weights
+		 * used (fixed or in the future configurable)
+		 * there could be still more buffers to be received.
+		 * only once we exhausted all queues or our NAPI
+		 * budget should we bail out:
+		 */
 		if ( (!queue_idx) && (num_rx_q_nonempty) ) {
 			num_rx_q_nonempty = 0;
 			num_rx_q_proc = 0;
 		}
 
-	} while ((done_total < budget) &&
-		 (num_rx_q_proc < NUM_OF_RX_QUEUES) );
+	} while ((done_total < budget) && /* look for packets as long as budget was not exhausted */
+		 (num_rx_q_proc < NUM_OF_RX_QUEUES) ); /* and not all RX queues were exhausted */
 
 	/* dev_dbg(&ppdev->pdev->dev, "done %d\n", done_total); */
 
@@ -1623,12 +1708,19 @@ int mvppnd_poll(struct napi_struct *napi, int budget)
 	pr_err("mvppnd_poll - NAPI poll - end\n");
 #endif
 
+	/*
+	 * process skbs in a list. This is much more
+	 * cache efficient as Linux kernel has a lot
+	 * of function called, and this allows only
+	 * the Linux kernel function to stay hot in
+	 * the CPU cache, imrpvoing performance.
+	 */
 	netif_receive_skb_list(&rx_list);
 
 #ifdef DBG_BUDGET
 	last_poll_pkts = done_total;
 	if (done_total > max_poll_pkts)
-		max_poll_pkts = done_total;
+		max_poll_pkts = done_total; /* debug telemetries */
 #endif
 
 	return done_total;
@@ -2095,9 +2187,8 @@ static ssize_t mvppnd_store_rx_ring_size(struct kobject *kobj,
 	case 1:
 		/* one arg, for backward compatibility - size of all */
 		for (i = 0; i < NUM_OF_RX_QUEUES; i++)
-			if (ppdev->rx_queues[i])
-				ppdev->rx_rings_size[i] =
-					roundup_pow_of_two(arg1);
+			ppdev->rx_rings_size[i] =
+				roundup_pow_of_two(arg1);
 		break;
 	case 2:
 		if (arg1 > NUM_OF_RX_QUEUES) {
@@ -2153,28 +2244,31 @@ static ssize_t mvppnd_show_driver_statistics(struct kobject *kobj,
 						attr_driver_statistics);
 	static unsigned long last_jiffies;
 	int i;
-	char lstr[64];
+	char lstr[96];
 
 
 	for (i = 0; i <= STATS_LAST; i++)
 		sprintf(buf, "%s%s: %ld\n", buf, mvppnd_get_stat_desc(i),
 			mvppnd_get_stat(ppdev, i, last_jiffies));
 	last_jiffies = jiffies;
-	sprintf(lstr, "last budget pkts: %d\n", last_budget_pkts);
+	/* debug counters - either last + max or incrementing counters: */
+	/* how much budget did we get from the kernel */
+	sprintf(lstr, "last budget packets: %d\n", last_budget_pkts);
 	strcat(buf, lstr);
-	sprintf(lstr, "max budget pkts: %d\n", max_budget_pkts);
+	sprintf(lstr, "max budget packets: %d\n", max_budget_pkts);
 	strcat(buf, lstr);
-	sprintf(lstr, "last poll pkts: %d\n", last_poll_pkts);
+	/* how many packets were polled in the NAPI poll handling: */
+	sprintf(lstr, "last poll packets: %d\n", last_poll_pkts);
 	strcat(buf, lstr);
-	sprintf(lstr, "max poll pkts: %d\n", max_poll_pkts);
+	sprintf(lstr, "max poll packets: %d\n", max_poll_pkts);
 	strcat(buf, lstr);
-	sprintf(lstr, "no skbs: %ld\n", no_skbs);
+	sprintf(lstr, "Failure to allocate receive buffers: %ld\n", no_skbs); /* failure to allocate RX SKBs counter */
 	strcat(buf, lstr);
-	sprintf(lstr, "tx timeout: %ld\n", tx_tout);
+	sprintf(lstr, "DMA TX timeout: %ld\n", tx_tout); /* SDMA TX timeout counter */
 	strcat(buf, lstr);
-	sprintf(lstr, "tx busy size: %ld\n", tx_busy_size);
+	sprintf(lstr, "tx busy returned due to size queued: %ld\n", tx_busy_size); /* driver ndo tx handler returned busy because too many buffers were queued for transmission */
 	strcat(buf, lstr);
-	sprintf(lstr, "tx busy no mem: %ld\n", tx_busy_mem);
+	sprintf(lstr, "tx busy returned due to memory allocation failure: %ld\n", tx_busy_mem); /* driver ndo tx handler returned busy because no memory could be allocated for buffer */
 	strcat(buf, lstr);
 
 	return strlen(buf);
@@ -2189,7 +2283,7 @@ static ssize_t mvppnd_store_driver_statistics(struct kobject *kobj,
 	u32 entries_bitmask;
 	int rc, i;
 
-	last_poll_pkts = max_poll_pkts = 0;
+	last_poll_pkts = max_poll_pkts = 0; /* zero debug statistics */
 	last_budget_pkts = max_budget_pkts = 0;
 
 	rc = sscanf(buf, "0x%x", &entries_bitmask);
@@ -2215,7 +2309,15 @@ static ssize_t mvppnd_store_if_create(struct kobject *kobj,
 	struct mvppnd_dev *ppdev = container_of(attr, struct mvppnd_dev,
 						attr_if_create);
 	char name[IFNAMSIZ];
-	int rc, port = -1;
+	int rc, port;
+
+	/*
+ 	 * Port argument is optional, if set by the user then let
+ 	 * mvppnd_create_netdev use it, otherwise pass -1 as indication to pick
+ 	 * the next port.
+ 	 * Set to -2 since convention for ports numbers is 1-based.
+ 	 */
+	port = -2;
 
 	rc = sscanf(buf, "%s %d", name, &port);
 	if ((rc != 1) && (rc != 2)) {
@@ -2224,20 +2326,6 @@ static ssize_t mvppnd_store_if_create(struct kobject *kobj,
 		return -EINVAL;
 	}
 
-	if (rc == 1) {
-		long lport;
-		char *p = (char *)buf;
-
-		while (*p && ( (*p<'0') || (*p>'9') ) ) p++;
-
-		if (*p) {
-			if (!kstrtol(p, 10, &lport))
-				port = lport;
-			else
-				pr_info("%s: conversion failed, line %d\n",
-						__func__, __LINE__);
-		}
-	}
 	rc = mvppnd_create_netdev(ppdev, name, port + 1 /* 1 based */);
 	if (rc < 0) {
 		dev_err(ppdev->dev,
@@ -2921,6 +3009,7 @@ static int mvppnd_xmit_buf(struct mvppnd_dev *ppdev,
 		mb();
 	} while (!sdma_took && !wait_too_long);
 
+	/* check again if buffer is still not free: */
 	wait_too_long = ((ppdev->tx_queue.ring.descs[wr_ptr]->cmd_sts &
                              TX_CMD_BIT_OWN_SDMA) == TX_CMD_BIT_OWN_SDMA);
 
@@ -2940,7 +3029,31 @@ static int mvppnd_xmit_buf(struct mvppnd_dev *ppdev,
 
 	if (wait_too_long) {
 		ret = -EIO;
-		tx_tout++;
+		tx_tout++; /* increment counter indicating SDMA TX timeout occured */
+		pr_err("TX TOUT q %d first desc ptr %llx frst idx %lu bd sts %x addr %x wr idx %lu bd sts %x addr %x en_q %x vendor %x devid %x \n",
+			ppdev->tx_queue_num,
+			ppdev->tx_queue.ring.ring_dma,
+			wr_ptr_first,
+			ppdev->tx_queue.ring.descs[wr_ptr_first]->cmd_sts,
+			ppdev->tx_queue.ring.descs[wr_ptr_first]->buf_addr,
+			wr_ptr,
+			ppdev->tx_queue.ring.descs[wr_ptr]->cmd_sts,
+			ppdev->tx_queue.ring.descs[wr_ptr]->buf_addr,
+			mvppnd_read_reg(ppdev, REG_ADDR_TX_QUEUE_CMD),
+			mvppnd_read_reg(ppdev, REG_ADDR_VENDOR),
+			mvppnd_read_reg(ppdev, REG_ADDR_DEVICE) );
+		pr_err(
+"rej %x LW %x NDP %x CTDP %x cur %x cfg %x glbl ctrl %x ext glbl ctrl %x lpbck %x\n",
+			mvppnd_read_reg(ppdev, 0x28F4 ),
+			mvppnd_read_reg(ppdev, 0x2604 + ppdev->tx_queue_num*0x10),
+			mvppnd_read_reg(ppdev, 0x2608 + ppdev->tx_queue_num*0x10),
+			mvppnd_read_reg(ppdev, 0x2684),
+			mvppnd_read_reg(ppdev, 0x26C0 + ppdev->tx_queue_num*4),
+			mvppnd_read_reg(ppdev, 0x2800),
+			mvppnd_read_reg(ppdev, 0x58),
+			mvppnd_read_reg(ppdev, 0x5C),
+			mvppnd_read_reg(ppdev, 0x64)
+								);
 	}
 	else
 		ret = total_bytes - ETH_ALEN * 2 - flow->config_tx_dsa_size;
@@ -3037,7 +3150,6 @@ static irqreturn_t mvppnd_isr(int irq, void *data)
 		 */
 		mvppnd_read_reg(ppdev, REG_ADDR_RX_CAUSE_1);
 	}
-	/*mvppnd_inc_stat(ppdev, STATS_INTERRUPTS_END, 1);*/
 
 	return IRQ_HANDLED;
 }
@@ -3105,6 +3217,10 @@ static void mvppnd_transmit_skb(struct sk_buff *skb)
 	print_frame(ppdev, skb->data, 100, false);
 	print_skb_hdr(ppdev, "tx", skb);
 
+	/*
+	 * if TX callback hook exists, call it and according to the
+	 * return value decide what needs to be done with the packet:
+	 */
 	if (ppdev->ops && ppdev->ops->process_tx) {
 		rc = ppdev->ops->process_tx(flow->ndev, skb);
 		switch (rc) {
@@ -3172,6 +3288,7 @@ static int rx_thread(void *data)
 #endif
 
 	while (!kthread_should_stop()) {
+
 		if (!test_bit(NAPI_STATE_SCHED, &ppdev->napi.state) &&
 		    !mvppnd_rings_empty(ppdev)) {
 			napi_schedule(&ppdev->napi);
@@ -3182,7 +3299,7 @@ static int rx_thread(void *data)
 			usleep_range(1, 2); /* trigger NAPI poll fast on NOHZ_FULL system, without HRTimer delay no interrupts will be generated ==> no softIRQ scheduled */
 		}
 		else
-			msleep(4);
+			msleep(4); /* msleep() so kernel will reschedule */
 #ifdef DBG_DELAY
 		j[i++] = jiffies;
 		if (i >= 4)
@@ -3312,15 +3429,14 @@ int mvppnd_open(struct net_device *dev)
  	 * For now no implenetation of separate interrupt-tree for devices other
  	 * than Falcon in CPSS. Until then let's have dedicated thread to
  	 * monitor RX rings
+	 * Also poll for Falcon as a mitigation for missed interrupts.
 	 */
-/*	if (ppdev->pdev.pdev->device != PCI_DEVICE_ID_FALCON) { */
-		ppdev->rx_thread = kthread_run(rx_thread, (void *)ppdev,
-					       "mvppnd_rx");
-		if (!ppdev->rx_thread) {
-			netdev_err(dev, "Fail to start RX thread\n");
-			goto destroy_tx_wq;
-		}
-/*	} */
+	ppdev->rx_thread = kthread_run(rx_thread, (void *)ppdev,
+				       "mvppnd_rx");
+	if (!ppdev->rx_thread) {
+		netdev_err(dev, "Fail to start RX thread\n");
+		goto destroy_tx_wq;
+	}
 
 	debug_print_some_registers(ppdev);
 
@@ -3359,7 +3475,7 @@ int mvppnd_stop(struct net_device *dev)
 	if (ppdev->rx_thread) {
 		kthread_stop(ppdev->rx_thread);
 		if (in_atomic()) 
-			udelay(RX_THREAD_UDELAY * 2);
+			mdelay((RX_THREAD_UDELAY * 2)/1000);
 		else
 			msleep(10);
 	}
@@ -3400,13 +3516,13 @@ netdev_tx_t mvppnd_start_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	/* We are overun, return 'busy' to slow down */
 	if (atomic_read(&ppdev->tx_skb_in_transit) > ppdev->tx_queue_size) {
-		tx_busy_size++;
+		tx_busy_size++; /* increment telemetry for this condition */
 		return NETDEV_TX_BUSY;
 	}
 
 	skb_work = kmalloc(sizeof(*skb_work), GFP_KERNEL);
 	if (unlikely(!skb_work)) {
-		tx_busy_mem++;
+		tx_busy_mem++; /* increment telemetry for this condition */
 		return NETDEV_TX_BUSY;
 	}
 
@@ -3418,6 +3534,26 @@ netdev_tx_t mvppnd_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	ppdev->sdev.stats[STATS_TX_IN_TRANSIT] =
 		atomic_read(&ppdev->tx_skb_in_transit);
 
+	/*
+	 * Always schedule on CPU #0.
+	 * If queue_work() is used, then kernel ends up
+	 * queuing on the current CPU (core).
+	 * this function (mvppnd_start_xmit() ) is called
+	 * always on top of the caller stack of user-space
+	 * (which called send()/sendto() to the kernel),
+	 * hence the current CPU/core is determined by the
+	 * CPU/core the user-space process sending is
+	 * scheduled on. under load, the Linux kernel will
+	 * reschedule this process to a different CPU/core
+	 * runqueue. If The kernel ping-pongs the process
+	 * between two cores/CPUs, using queue_work() will
+	 * end up queuing TX packets on two different CPU's
+	 * work-queues, which can run concurrenly, creating
+	 * an unhandled race condition. queuing to CPU #0
+	 * will ensure queuing is always done to the same
+	 * workqueue thread, which always exists, preventing
+	 * this race condition from occuring:
+	 */
 	queue_work_on(0, ppdev->tx_wq, &skb_work->work);
 
 	return NETDEV_TX_OK;
@@ -3449,14 +3585,8 @@ static void mvppnd_init_ppdev(struct mvppnd_dev *ppdev, struct pci_dev *pdev,
 	ppdev->tx_queue_num = DEFAULT_TX_QUEUE;
 	ppdev->rx_queues_mask = DEFAULT_RX_QUEUES;
 
-	if (pdev && pdev->device != PCI_DEVICE_ID_ALDRIN2) {
-#ifdef CONFIG_X86_64
-                if (pdev->device == PCI_DEVICE_ID_FALCON)
-                        ppdev->pdev.atu_win = DEFAULT_ATU_WIN_Xeon;
-                else
-#endif
+	if (pdev && pdev->device != PCI_DEVICE_ID_ALDRIN2)
 		ppdev->pdev.atu_win = DEFAULT_ATU_WIN;
-	}
 	else
 		ppdev->pdev.atu_win = -1;
 
@@ -3494,9 +3624,8 @@ int mvppnd_create_netdev(struct mvppnd_dev *ppdev, const char *name, int port)
 
 	if (port >= 0) {
 		if ((port >= MAX_NETDEVS) ||
-		    test_and_set_bit(port, ppdev->sdev.flows_bitmap)) {
+		    test_and_set_bit(port, ppdev->sdev.flows_bitmap))
 			return -ENOMEM;
-		}
 		flow_id = port;
 	} else {
 		flow_id = find_first_zero_bit(ppdev->sdev.flows_bitmap,
@@ -3843,6 +3972,12 @@ static int mvppnd_pdriver_probe(struct platform_device *pdev)
 
 	dev_info(&pdev->dev, "Using platform device %s\n", pdev->name);
 
+	/*
+	 * Platform driver is for AC5/X. DDR start at 0x2_0000_0000,
+	 * Hence 34 bit DMA mask is required:
+	 */
+	pdev->dev.coherent_dma_mask = DMA_BIT_MASK(34);
+	pdev->dev.dma_mask = &pdev->dev.coherent_dma_mask;
 	ppdev = kmalloc(sizeof(*ppdev), GFP_KERNEL | __GFP_ZERO);
 	if (!ppdev) {
 		dev_err(&pdev->dev, "Fail to allocate ppdev, aborting.\n");
@@ -3948,6 +4083,7 @@ int mvppnd_init(void)
 {
 	int rc;
 
+	pr_info("Version: %s\n", ETH_DRV_VER);
 #ifdef SUPPORT_PLATFORM_DEVICE
 	int err;
 
@@ -3970,9 +4106,3 @@ void mvppnd_exit(void)
 #endif
 	pci_unregister_driver(&mvppnd_pci_driver);
 }
-
-module_init(mvppnd_init);
-module_exit(mvppnd_exit);
-
-MODULE_LICENSE("GPL");
-
