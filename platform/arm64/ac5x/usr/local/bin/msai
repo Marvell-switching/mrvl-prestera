@@ -1,0 +1,18 @@
+#!/bin/sh
+
+###########################################################################
+# /usr/bin/msai
+#
+# A convenient wrapper to print the Marvell SAI Info.
+###########################################################################
+banner()
+{
+  echo "+------------------------------------------+"
+  printf "|`tput bold` %-40s `tput sgr0`|\n" "$@"
+  echo "+------------------------------------------+"
+}
+banner "Marvell SAI Version"
+docker exec syncd mrvlcmd -c "dbg sai-dump call saiDumpBuildInfo" | grep -v end | grep -v "Console" 
+banner "Marvell SDK Version"
+docker exec syncd mrvlcmd -c "show version" | grep -v end | grep -v "Console"
+
