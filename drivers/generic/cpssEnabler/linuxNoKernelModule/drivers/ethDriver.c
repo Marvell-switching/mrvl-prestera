@@ -45,7 +45,11 @@ disclaimer.
 #include <linux/ipv6.h>
 #endif
 #include <linux/kthread.h>
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(5,16,0)
 #include <asm-generic/bitops/find.h>
+#else
+#include <linux/find.h>
+#endif
 #include "ethDriver.h"
 
 /* #define DBG_DELAY */
@@ -2052,13 +2056,19 @@ static ssize_t mvppnd_store_mac(struct kobject *kobj,
 	struct mvppnd_switch_flow *flow =
 		container_of(attr, struct mvppnd_switch_flow, attr_mac);
 	unsigned int mac[ETH_ALEN];
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,15,0)
 	int i;
+#endif
 
 	sscanf(buf, "%x:%x:%x:%x:%x:%x\n", &mac[0], &mac[1], &mac[2], &mac[3],
 	       &mac[4], &mac[5]);
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,15,0)
 	for (i = 0; i < ETH_ALEN; i++)
 		flow->ndev->dev_addr[i] = mac[i];
+#else
+	dev_addr_mod(flow->ndev, 0, mac, ETH_ALEN);
+#endif
 
 	return count;
 }
@@ -3399,8 +3409,13 @@ int mvppnd_open(struct net_device *dev)
 
 	mvppnd_disable_tx_interrupts(ppdev);
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,1,0)
 	netif_napi_add(dev, &ppdev->napi, mvppnd_poll,
 		       DEFAULT_NAPI_POLL_WEIGHT);
+#else
+	netif_napi_add_weight(dev, &ppdev->napi, mvppnd_poll,
+		       DEFAULT_NAPI_POLL_WEIGHT);
+#endif
 	napi_enable(&ppdev->napi);
 
 	mvppnd_sysfs_set_mode(ppdev, S_IRUGO);
@@ -3621,6 +3636,7 @@ int mvppnd_create_netdev(struct mvppnd_dev *ppdev, const char *name, int port)
 	struct net_device *ndev;
 	unsigned long flow_id;
 	int rc;
+	u8  u8_flow_id;
 
 	if (port >= 0) {
 		if ((port >= MAX_NETDEVS) ||
@@ -3688,12 +3704,23 @@ int mvppnd_create_netdev(struct mvppnd_dev *ppdev, const char *name, int port)
 	       flow->config_tx_dsa_size);
 
 	if (!flow_id) {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,15,0)
 		memcpy(ndev->dev_addr, DEFAULT_MAC, ETH_ALEN);
+#else
+		dev_addr_mod(ndev, 0, DEFAULT_MAC, ETH_ALEN);
+#endif
 	} else {
 		/* MAC is based on port 0 MAC with last byte set to flow ID */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,15,0)
 		memcpy(ndev->dev_addr, ppdev->sdev.flows[0]->ndev->dev_addr,
 		       ETH_ALEN);
 		ndev->dev_addr[5] = flow_id;
+#else
+		dev_addr_mod(ndev, 0, ppdev->sdev.flows[0]->ndev->dev_addr,
+		             ETH_ALEN);
+		u8_flow_id = flow_id;
+		dev_addr_mod(ndev, 5, &u8_flow_id, 1);
+#endif
 
 		flow->config_tx_dsa[1] = flow->rx_dsa_val[1];
 		flow->config_tx_dsa[6] = flow->rx_dsa_val[6];
@@ -3845,7 +3872,7 @@ static int mvppnd_pci_probe(struct pci_dev *pdev,
 	}
 
 	/* We want 32 bit address space */
-	rc = pci_set_dma_mask(pdev, DMA_BIT_MASK(32));
+	rc = dma_set_mask(&pdev->dev, DMA_BIT_MASK(32));
 	if (rc) {
 		dev_err(&pdev->dev, "Fail to set 32bit DMA mask\n");
 		goto free_regions;
