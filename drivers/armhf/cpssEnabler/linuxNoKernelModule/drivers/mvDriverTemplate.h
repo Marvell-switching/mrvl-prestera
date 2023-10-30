@@ -25,30 +25,10 @@ WARRANTIES OF MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE ARE EXPRESSLY
 DISCLAIMED.  The GPL License provides additional details about this warranty
 disclaimer.
 ********************************************************************************
-* mvDriverTemplate.h
+* @file mvDriverTemplate.h
 *
-* DESCRIPTION:
-*       Driver template: includes
-*       Requirements before include:
-*           MV_DRV_NAME     - driver name, for example "mvDmaDrv"
-*           MV_DRV_MAJOR    - device major number
-*           MV_DRV_MINOR    - device minor number
-*           MV_DRV_FOPS     - file_operations structure
+* @brief Character device wrappers
 *
-*           Optional:
-*               MV_DRV_PREINIT   - static int MV_DRV_PREINIT(void);
-*               MV_DRV_POSTINIT  - static void MV_DRV_POSTINIT(void);
-*               MV_DRV_RELEASE   - static void MV_DRV_RELEASE(void);
-*
-* USAGE:
-*       Kernel module command line parameters
-*           major=<num>     - Set device node major number. If 0 passes
-*                             then allocate devica major dynamically
-*           minor=<num>     - Set device node minor number
-*
-* DEPENDENCIES:
-*
-*       $Revision: 1 $
 *******************************************************************************/
 #include <linux/uaccess.h>
 #include <linux/init.h>
@@ -58,124 +38,105 @@ disclaimer.
 #include <linux/module.h>
 #include <linux/device.h>
 #include <linux/slab.h>
-#include <cpss/generic/version/cpssGenStream.h>
 
-MODULE_VERSION(CPSS_STREAM_NAME_CNS);
-
-static int                  major = 0;
-static int                  minor = MV_DRV_MINOR;
-static struct cdev          mvDrv_cdev;
-static struct class*        mvDrv_class;
-static struct device*       mvDrv_device;
-
-static struct file_operations MV_DRV_FOPS;
-#ifdef MV_DRV_PREINIT
-static int MV_DRV_PREINIT(void);
-#endif
-#ifdef MV_DRV_POSTINIT
-static void MV_DRV_POSTINIT(void);
-#endif
-#ifdef MV_DRV_RELEASE
-static void MV_DRV_RELEASE(void);
-#endif
-
+/*
+ * Character device context, created by mvchrdev_init and use as argument for
+ * function mvchrdev_cleanup
+ */
+struct mvchrdev_ctx {
+	struct class *class;
+	struct device *dev;
+	struct cdev cdev;
+	int major;
+	int minor;
+};
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,32)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3,4,69)
-static char *mvDrv_devnode(struct device *dev, umode_t *mode)
+static char *mvchrdev_devnode(struct device *dev, umode_t *mode)
 #else /* < 3.4.69 */
-static char *mvDrv_devnode(struct device *dev, mode_t *mode)
+static char *mvchrdev_devnode(struct device *dev, mode_t *mode)
 #endif /* < 3.4.69 */
 {
 	return kasprintf(GFP_KERNEL, "%s", dev->kobj.name);
 }
 #endif /* >= 2.6.32 */
 
-static void mvDrv_cleanup(void)
+static void mvchrdev_cleanup(struct mvchrdev_ctx *ctx)
 {
-#ifdef MV_DRV_RELEASE
-	MV_DRV_RELEASE();
-#endif
+	if (!ctx)
+		return;
 
-	device_destroy(mvDrv_class, MKDEV(major, minor));
-	class_destroy(mvDrv_class);
-	cdev_del(&mvDrv_cdev);
+	dev_info(ctx->dev, "Device destroyed, major %d, minor %d\n", ctx->major,
+		 ctx->minor);
 
-	unregister_chrdev_region(MKDEV(major, minor), 1);
+	device_destroy(ctx->class, MKDEV(ctx->major, ctx->minor));
+	class_destroy(ctx->class);
+	cdev_del(&ctx->cdev);
+
+	unregister_chrdev_region(MKDEV(ctx->major, ctx->minor), 1);
+
+	kfree(ctx);
 }
 
-static int mvDrv_init(void)
+static struct mvchrdev_ctx *mvchrdev_init(const char *name,
+					  const struct file_operations *fops)
 {
-	int result = 0;
+	struct mvchrdev_ctx *ctx;
+	int rc = 0;
 	dev_t dev;
 
-#ifdef MV_DRV_PREINIT
-	result = MV_DRV_PREINIT();
-	if (result < 0)
-		return result;
-#endif
+	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
+	if (unlikely(!ctx))
+		return NULL;
 
-	/* first thing register the device at OS */
-	if (major != 0) {
-		/* Register your major. */
-		dev = MKDEV(major, minor);
-		result = register_chrdev_region(dev, 1, MV_DRV_NAME);
-	} else {
-		/* get dynamic major */
-		result = alloc_chrdev_region(&dev, minor, 1, MV_DRV_NAME);
-		if (result == 0) {
-			major = MAJOR(dev);
-			minor = MINOR(dev);
-			printk("Got dynamic major for " MV_DRV_NAME ": %d\n", major);
-		}
-	}
-	if (result < 0) {
-		printk(MV_DRV_NAME "_init: register_chrdev_region err= %d\n", result);
-		return result;
+	rc = alloc_chrdev_region(&dev, 1, 1, name);
+	if (rc) {
+		pr_err("%s: Fail to allocate chrdev region (%d)\n", name, rc);
+		goto err_free;
 	}
 
-	cdev_init(&mvDrv_cdev, &MV_DRV_FOPS);
-	mvDrv_cdev.owner = THIS_MODULE;
-	result = cdev_add(&mvDrv_cdev, dev, 1);
-	if (result) {
-		printk(MV_DRV_NAME "_init: cdev_add err= %d\n", result);
-error_region:
-		unregister_chrdev_region(dev, 1);
-		return result;
+	ctx->major = MAJOR(dev);
+	ctx->minor = MINOR(dev);
+
+	cdev_init(&ctx->cdev, fops);
+	ctx->cdev.owner = THIS_MODULE;
+	rc = cdev_add(&ctx->cdev, dev, 2);
+	if (rc) {
+		pr_err("%s: Fail to add chrdev (%d)\n", name, rc);
+		goto err_unreg_drv;
 	}
-	mvDrv_class = class_create(THIS_MODULE, MV_DRV_NAME);
-	if (IS_ERR(mvDrv_class)) {
-		printk(KERN_ERR "Error creating " MV_DRV_NAME " class.\n");
-		cdev_del(&mvDrv_cdev);
-		result = PTR_ERR(mvDrv_class);
-		goto error_region;
+
+	ctx->class = class_create(THIS_MODULE, name);
+	if (IS_ERR(ctx->class)) {
+		pr_err("%s: Fail to create class (%d)\n", name, rc);
+		goto err_del_cdev;
 	}
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,32)
-	mvDrv_class->devnode = mvDrv_devnode;
+	ctx->class->devnode = mvchrdev_devnode;
 #endif
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,27)
-	mvDrv_device = device_create(mvDrv_class, NULL, dev, NULL, MV_DRV_NAME);
+	ctx->dev = device_create(ctx->class, NULL, dev, NULL, name);
 #else
-	mvDrv_device = device_create(mvDrv_class, NULL, dev, MV_DRV_NAME);
+	ctx->dev = device_create(ctx->class, NULL, dev, name);
 #endif
 
-#ifdef MV_DRV_POSTINIT
-	MV_DRV_POSTINIT();
-#endif
+	dev_info(ctx->dev, "Device created, major %d, minor %d\n", ctx->major,
+		 ctx->minor);
 
-	printk(KERN_DEBUG "device " MV_DRV_NAME " created, major=%d minor=%d\n", major, minor);
+	return ctx;
 
-	return 0;
+err_del_cdev:
+	cdev_del(&ctx->cdev);
+
+err_unreg_drv:
+	unregister_chrdev_region(dev, 1);
+
+err_free:
+	kfree(ctx);
+
+	return NULL;
 }
 
-module_init(mvDrv_init);
-module_exit(mvDrv_cleanup);
-
-module_param(major, int, S_IRUGO);
-module_param(minor, int, S_IRUGO);
-
-MODULE_AUTHOR("Marvell Semi.");
 MODULE_LICENSE("GPL");
-
-

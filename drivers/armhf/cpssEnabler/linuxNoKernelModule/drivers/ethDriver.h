@@ -25,13 +25,34 @@ DISCLAIMED.  The GPL License provides additional details about this warranty
 disclaimer.
 *******************************************************************************/
 
-#ifndef __mvIntDriver_h__
-#define __mvIntDriver_h__
+#ifndef __ethDriver_h__
+#define __ethDriver_h__
 
-#include <linux/semaphore.h>
+#include <linux/types.h>
+#include <linux/netdevice.h>
 
-/* Register/unregister to receive IRQs */
-extern int mvintdrv_register_isr_sema(struct semaphore *sema);
-extern void mvintdrv_unregister_isr_sema(struct semaphore *sema);
+#define MAX_FRAGS 8
+#define NUM_OF_RX_QUEUES 8
+#define DSA_SIZE 16
+
+struct mvppnd_dma_sg_buf {
+	unsigned char *virt;
+	dma_addr_t mappings[MAX_FRAGS + 1]; /* 1 for head */
+	size_t sizes[MAX_FRAGS + 1];
+};
+
+extern int mvppnd_emulate_rx(struct net_device *ndev, u8 *dsa, char *data,
+			     size_t data_len, u8 queue);
+
+struct mvppnd_ops {
+	/* May return NF_ACCEPT, NF_DROP, NF_STOLEN and NF_QUEUE (route to TX) */
+	int (*process_rx)(struct net_device *ndev, unsigned char *data,
+			  int *sz, int max_sz);
+	/* May return NF_ACCEPT, NF_DROP, NF_STOLEN and NF_QUEUE (route to RX) */
+	int (*process_tx)(struct net_device *ndev, struct sk_buff *skb);
+};
+
+extern int mvppnd_register_hooks(struct net_device *ndev,
+				 struct mvppnd_ops *ops);
 
 #endif
