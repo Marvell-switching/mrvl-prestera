@@ -1,12 +1,18 @@
 # -*-makefile-*-
 # call from kernel build system
 
-TARGETS = mvDmaDrv mvIntDrv mvMbusDrv
-ifeq ("$(TARGET)", "armv8")
-TARGETS += mvEthDrv
-endif
+TARGETS = mvcpss
 
 ifneq ($(KERNELRELEASE),)
+
+ifeq ($(CONFIG_KM_MVETH), y)
+# Skip compilation of ethOpsDriver.c and ethDriver.c if Kernel source version is less than 4.14
+cond=$(shell if ( [ $(VERSION) -le 4 ] && [ $(PATCHLEVEL) -lt 14 ] ); then echo 1; else echo 0; fi)
+ifneq ($(cond),1)
+TARGETS += mvEthOpsDrv
+TARGETS += mvSai
+endif
+endif
 
 #Extract the path of the CPSS project into HOME_DIR variable
 ifeq (customer, $(environment_mode))
@@ -18,11 +24,31 @@ endif
 
 ccflags-y := -I$(HOME_DIR)common/h
 obj-m := $(addsuffix .o,$(TARGETS))
-mvDmaDrv-y := dmaDriver.o
-mvIntDrv-y := intDriver.o
-mvMbusDrv-y := mbusDriver.o mbusResources.o
-ifeq ("$(TARGET)", "armv8")
-mvEthDrv-y := ethDriver.o
+
+mvEthOpsDrv-$(CONFIG_KM_MVETH) := ethOpsDriver.o
+
+mvcpss-y := mvcpss_main.o
+
+mvcpss-$(CONFIG_KM_MVPCI) += mvpci.o
+ccflags-$(CONFIG_KM_MVPCI) += -DCONFIG_KM_MVPCI
+
+mvcpss-$(CONFIG_KM_MVDMA2) += dmaDriver2.o
+ccflags-$(CONFIG_KM_MVDMA2) += -DCONFIG_KM_MVDMA2
+
+mvcpss-$(CONFIG_KM_MVDMA) += dmaDriver.o
+ccflags-$(CONFIG_KM_MVDMA) += -DCONFIG_KM_MVDMA
+
+mvcpss-$(CONFIG_KM_MVINT) += intDriver.o
+ccflags-$(CONFIG_KM_MVINT) += -DCONFIG_KM_MVINT
+
+mvcpss-$(CONFIG_KM_MVMBUS) += mbusDriver.o mbusResources.o
+ccflags-$(CONFIG_KM_MVMBUS) += -DCONFIG_KM_MVMBUS
+
+ifneq ($(cond), 1)
+mvcpss-$(CONFIG_KM_MVETH) += ethDriver.o
+ccflags-$(CONFIG_KM_MVETH) += -DCONFIG_KM_MVETH
+
+mvSai-$(CONFIG_KM_MVETH) := saiMod.o
 endif
 
 else
