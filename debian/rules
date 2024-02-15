@@ -3,9 +3,10 @@
 include /usr/share/dpkg/pkg-info.mk
 
 PACKAGE_PRE_NAME := mrvlprestera
+MOD_SRC_DIR:= $(shell pwd)
 
 %:
-	dh $@ --with systemd,python2,python3 --buildsystem=pybuild
+	dh $@ --with systemd,python3 --buildsystem=pybuild
 
 clean:
 	dh_testdir
@@ -13,7 +14,8 @@ clean:
 	dh_clean
 
 build:
-	# Noting to do
+	sed "s/ARCH/${CONFIGURED_ARCH}/g" ${MOD_SRC_DIR}/debian/mrvlprestera.install.template > ${MOD_SRC_DIR}/debian/mrvlprestera.install
+	# Done
 
 binary: binary-arch binary-indep
 	# Nothing to do

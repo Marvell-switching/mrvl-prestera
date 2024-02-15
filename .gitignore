@@ -6,4 +6,4 @@
 *.mod.c
 *.symvers
 *.order
-
+debian/mrvlprestera.install
