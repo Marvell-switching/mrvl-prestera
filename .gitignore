@@ -1,8 +1,9 @@
 *.cmd
 *.o
+*.o.d
 *.ko
 *.mod
 *.mod.c
 *.symvers
 *.order
-
+debian/mrvlprestera.install
