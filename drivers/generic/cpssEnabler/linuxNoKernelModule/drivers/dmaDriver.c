@@ -457,6 +457,7 @@ static int mvdmadrv_pdriver_remove(struct platform_device *pdev)
 
 static const struct of_device_id mvdmadrv_of_match_ids[] = {
 	 { .compatible = "marvell,mv_dma", },
+	{}
 };
 
 static struct platform_driver mvdmadrv_platform_driver = {

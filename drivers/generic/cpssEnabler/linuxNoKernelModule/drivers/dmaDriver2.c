@@ -200,10 +200,27 @@ static void mvdma_remove_open_file(struct file *file)
 static void mvdma_free_dma_mapping(struct device *dev,
 				   struct dma_mapping *mapping)
 {
+	phys_addr_t p;
+
 	BUG_ON(!mapping->dma);
 
 	dev_dbg(dev, "dma_free_coherent size %ld, virt %p, dma 0x%llx",
 		mapping->size, mapping->virt, (unsigned long long)mapping->dma);
+
+	/*
+	 * Kernel 6.x BUGs when reserved memory marked pages are returned.
+         * Do not free reserved memory for this kernel:
+	 */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,1,39)
+	for (p = mapping->dma;
+	     p < (mapping->dma + mapping->size);
+	     p += PAGE_SIZE)
+		if (PageReserved((struct page *)phys_to_page(p))) {
+			dev_err(dev, "Reserved memory@%llx, cannot free!\n",
+				mapping->dma);
+			return;
+		}
+#endif
 
 	dma_free_coherent(dev, mapping->size, mapping->virt, mapping->dma);
 }
@@ -236,14 +253,29 @@ static struct dma_mapping *mvdma_alloc_dma_mapping(struct device *dev,
 	mapping->size = size;
 	mapping->virt = dma_alloc_coherent(dev, size, &mapping->dma,
 					   MV_DMA_ALLOC_FLAGS);
-	if (!mapping->virt)
-		goto err_free_mapping_msg;
+	if (!mapping->virt) {
+		dev_err(dev, "Failed coherent DMA allocation, fallback to CMA\n");
+		/*
+		 * Looks like reserved memory release is not returned
+		 * to the reserved memory area. If coherent allocation
+		 * fails, release device tree reserved memory settings
+		 * and try to allocate from CMA:
+		 */
+		of_reserved_mem_device_release(dev);
+		mapping->virt = dma_alloc_coherent(dev, size, &mapping->dma,
+						   MV_DMA_ALLOC_FLAGS);
+		if (!mapping->virt) {
+			dev_err(dev, "Failed coherent DMA allocation, both reserved and CMA!\n");
+			goto err_free_mapping_msg;
+		}
+	}
 
 	/* Make sure address is aligned with the size */
 	if (mvdma_reminder(mapping->dma, mapping->size)) {
 		struct dma_mapping m_1;
 
-		dev_dbg(dev, "Coherent memory is not aligned, adjusting\n");
+		dev_info(dev, "Coherent memory %llx,%lx is not aligned, adjusting\n",
+			mapping->dma, mapping->size);
 
 		/* Reserve dummy place */
 		m_1.size = mapping->size - mvdma_reminder(mapping->dma,
@@ -254,6 +286,7 @@ static struct dma_mapping *mvdma_alloc_dma_mapping(struct device *dev,
 		if (!m_1.virt)
 			goto err_free_mapping;
 
+		dev_dbg(dev, "aligner allocated: %llx, %lx\n", m_1.dma, m_1.size);
 		/* Remap, this time we should be aligned */
 		mapping->virt = dma_alloc_coherent(dev, size, &mapping->dma,
 						   MV_DMA_ALLOC_FLAGS);
@@ -269,6 +302,8 @@ static struct dma_mapping *mvdma_alloc_dma_mapping(struct device *dev,
 			goto err_free_mapping;
 		}
 	}
+		dev_dbg(dev, "Coherent memory %llx, %lx is aligned:\n",
+			mapping->dma, mapping->size);
 
 #ifdef MMAP_USE_REMAP_PFN_RANGE
 #if defined(CONFIG_X86) || defined(CONFIG_MIPS)
@@ -704,6 +739,7 @@ static int mvdma_pdriver_remove(struct platform_device *pdev)
 
 static const struct of_device_id mvdma_of_match_ids[] = {
 	 { .compatible = "marvell,mv_dma", },
+	{}
 };
 
 static struct platform_driver mvdma_platform_driver = {
@@ -735,6 +771,7 @@ void mvdma2_exit(void)
 	debugfs_remove(debugfs_mmaps);
 	debugfs_remove(debugfs_dir);
 
+	of_reserved_mem_device_release(mvdma_ctx->dev);
 	mvdma_free_global_devs_mappings();
 }
 
