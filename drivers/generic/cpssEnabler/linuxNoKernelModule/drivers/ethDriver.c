@@ -63,7 +63,7 @@ disclaimer.
 #include <linux/of_irq.h>
 #endif
 
-#define ETH_DRV_VER "1.01"
+#define ETH_DRV_VER "1.03"
 
 /* TODO List
 - Complete queue initialization (i.e. when CPSS skip init our queues)
@@ -74,8 +74,11 @@ disclaimer.
 #define PCI_DEVICE_ID_FALCON  0x8400
 #define PCI_DEVICE_ID_AC5P    0x9400
 #define PCI_DEVICE_ID_HARRIER 0x9041
-#define PCI_DEVICE_ID_AC5X    0x981f
+#define PCI_DEVICE_ID_AC5X_1  0x9803
+#define PCI_DEVICE_ID_AC5X_2  0x981f
 #define PCI_DEVICE_ID_ALDRIN2 0xcc0f
+#define PCI_DEVICE_ID_IML     0xa000
+#define PCI_DEVICE_ID_AC5     0xb400
 #define NUM_OF_TX_QUEUES NUM_OF_RX_QUEUES
 #define NUM_OF_ATU_WINDOWS 8
 #define NUM_OF_MG_WINDOWS 6
@@ -86,6 +89,7 @@ disclaimer.
 #define REG_ADDR_BASE_FALCON		0x1D000000
 #define REG_ADDR_BASE_AC5P		0x3C200000
 #define REG_ADDR_BASE_AC5X		0x7F900000
+#define REG_ADDR_BASE_AC5		0x0
 #define REG_ADDR_BASE_MASK		ATU_WIN_SIZE /* To mask reg addr with */
 #define REG_ADDR_BASE_MG_SHIFT		20 /* MG cluster ID bit in reg addr */
 #define REG_ADDR_VENDOR			0x0050
@@ -178,7 +182,7 @@ static const unsigned long TX_QUEUE_SIZE = 10000;
 static const u16 DEFAULT_NAPI_POLL_WEIGHT = NAPI_POLL_WEIGHT * 4;
 static const u8 MAX_EMPTY_NAPI_POLL = 20;
 static const int RX_THREAD_UDELAY = 5000;
-static const u16 DEFAULT_ATU_WIN = 4;
+static const u16 DEFAULT_ATU_WIN = 5;
 /* MG windows - one for coherent and max 2 for streaming, indexes below */
 static const u8 DEFAULT_MG_WIN = 0xE;
 static const u8 MG_WIN_COHERENT_IDX = 0;
@@ -408,8 +412,9 @@ static u8 platdrv_registered;
 struct device_private_data falcon_private_data = {REG_ADDR_BASE_FALCON};
 struct device_private_data ac5p_private_data = {REG_ADDR_BASE_AC5P};
 struct device_private_data ac5x_private_data = {REG_ADDR_BASE_AC5X};
+struct device_private_data ac5_private_data = {REG_ADDR_BASE_AC5};
 
-/* 
+/*
  * netif_receive_skb_list() was only introduced in
  * kernel 4.19 . Make a naive implementation of
  * a function which can process a list of skb
@@ -494,6 +499,59 @@ static bool mvppnd_is_valid_atu_win(struct mvppnd_dev *ppdev)
 	return true;
 }
 
+/*
+	Check existing CPSS oATU window entries
+	If they cover the request oATU window mapping
+	then return true
+
+	Add second loop: If we identify overlapping start
+	but different size, just increase the size, and
+	return true
+*/
+static bool mvppnd_handle_covered_by_oATU(struct mvppnd_dev *ppdev,
+				    u32 base_addr, u32 size)
+{
+	u32 i;
+	u32 read_start, read_end, winx_offs;
+
+	for (i = 0; i < ppdev->pdev.atu_win; i++)
+	{
+		/* Go to our window (oATU) */
+		winx_offs = ATU_OFFS + i * 0x0200;
+
+		read_start = ioread32(ppdev->pdev.bar0 + winx_offs + 0x8);
+		read_end = ioread32(ppdev->pdev.bar0 + winx_offs + 0x10);
+
+		if ( (read_start <= base_addr) &&
+		     ( (read_end) >= (base_addr + size) ) )
+			return true;
+	}
+
+	for (i = 0; i < ppdev->pdev.atu_win; i++)
+	{
+		/* Go to our window (oATU) */
+		winx_offs = ATU_OFFS + i * 0x0200;
+
+		read_start = ioread32(ppdev->pdev.bar0 + winx_offs + 0x8);
+		read_end = ioread32(ppdev->pdev.bar0 + winx_offs + 0x10);
+		/*
+		 * if partial overlap at start, just increase current MG window
+		 * to cover both original and newly requested window:
+		 */
+		if ( (read_start <= base_addr) &&
+		     ( read_end > base_addr ) &&
+		     ( read_end < (base_addr + size) ) ) {
+			read_end = base_addr + size;
+			dev_info(ppdev->dev, "Adjusting oATU window entry %d (%x) to end at %x\n",
+				 i, read_start, read_end);
+			iowrite32(read_end, ppdev->pdev.bar0 + winx_offs + 0x10);
+			return true;
+		}
+	}
+
+	return false;
+}
+
 static int mvppnd_setup_iatu_window(struct mvppnd_dev *ppdev, int mg_cluster)
 {
 	u32 reg_addr_base, winx_offs, winx_start;
@@ -530,7 +588,7 @@ static int mvppnd_setup_iatu_window(struct mvppnd_dev *ppdev, int mg_cluster)
 	return 0;
 }
 
-static int mvppnd_setup_oatu_window(struct mvppnd_dev *ppdev, u32 base,
+static int mvppnd_setup_oatu_window(struct mvppnd_dev *ppdev, u64 base,
 				    u32 size)
 {
 	u32 winx_offs;
@@ -548,10 +606,11 @@ static int mvppnd_setup_oatu_window(struct mvppnd_dev *ppdev, u32 base,
 
 	iowrite32(0, ppdev->pdev.bar0 + winx_offs + 0x0);
 	iowrite32(0x80000000, ppdev->pdev.bar0 + winx_offs + 0x4);
-	iowrite32(base | BIT(31), ppdev->pdev.bar0 + winx_offs + 0x8);
+	iowrite32((base & 0xFFFFFFFF) | BIT(31), ppdev->pdev.bar0 + winx_offs + 0x8);
 	iowrite32(0, ppdev->pdev.bar0 + winx_offs + 0xC);
-	iowrite32((base | BIT(31)) + size, ppdev->pdev.bar0 + winx_offs + 0x10);
-	iowrite32(base, ppdev->pdev.bar0 + winx_offs + 0x14);
+	iowrite32(((base & 0xFFFFFFFF) | BIT(31)) + size, ppdev->pdev.bar0 + winx_offs + 0x10);
+	iowrite32(base & 0xFFFFFFFF, ppdev->pdev.bar0 + winx_offs + 0x14);
+	iowrite32(base >> 32, ppdev->pdev.bar0 + winx_offs + 0x18);
 
 	return 0;
 }
@@ -714,12 +773,16 @@ static void mvppnd_init_target_and_control(struct mvppnd_dev *ppdev,
 	Check existing CPSS MG window entries
 	If they cover the request MG window mapping
 	then return true
+
+	Add second loop: If we identify overlapping start
+	but different size, just increase the size, and
+	return true
 */
-static bool mvppnd_is_covered_by_mg(struct mvppnd_dev *ppdev, u8 max_mg_win,
+static bool mvppnd_handle_covered_by_mg(struct mvppnd_dev *ppdev, u8 max_mg_win,
 				    u32 base_addr, u32 size)
 {
 	u32 i;
-	u32 read_base, read_size;
+	u32 read_base, read_size, control;
 
 	for (i = 0; i < max_mg_win; i++)
 	{
@@ -729,38 +792,77 @@ static bool mvppnd_is_covered_by_mg(struct mvppnd_dev *ppdev, u8 max_mg_win,
 		read_size = mvppnd_read_reg(ppdev,
 				REG_ADDR_MG_SIZE + i *
 				REG_ADDR_MG_SIZE_OFFSET_FORMULA) & 0xFFFF0000;
+		control = mvppnd_read_reg(ppdev,
+					  REG_ADDR_MG_CONTROL + i *
+					  REG_ADDR_MG_CONTROL_OFFSET_FORMULA);
+
+		if (control & 0x1)
+			continue; /* MG window disabled, skip entry */
 
 		if ( (read_base <= base_addr) &&
 		     ( (read_base + read_size) >= (base_addr + size) ) )
 			return true;
 	}
 
+	for (i = 0; i < max_mg_win; i++)
+	{
+		read_base = mvppnd_read_reg(ppdev,
+				REG_ADDR_MG_BASE_ADDR + i *
+				REG_ADDR_MG_BASE_ADDR_OFFSET_FORMULA) & 0xFFFF0000;
+		read_size = mvppnd_read_reg(ppdev,
+				REG_ADDR_MG_SIZE + i *
+				REG_ADDR_MG_SIZE_OFFSET_FORMULA) & 0xFFFF0000;
+		control = mvppnd_read_reg(ppdev,
+					  REG_ADDR_MG_CONTROL + i *
+					  REG_ADDR_MG_CONTROL_OFFSET_FORMULA);
+
+		if (control & 0x1)
+			continue; /* MG window disabled, skip entry */
+
+		/*
+		 * if partial overlap at start, just increase current MG window
+		 * to cover both original and newly requested window:
+		 */
+		if ( (read_base <= base_addr) &&
+		     ( (read_base + read_size) > base_addr ) &&
+		     ( (read_base + read_size) < (base_addr + size) ) ) {
+			read_size = base_addr + size - read_base;
+			dev_info(ppdev->dev, "Adjusting MG window entry %d (%x) to size %x\n",
+				 i, read_base, read_size);
+			mvppnd_write_reg(ppdev, REG_ADDR_MG_SIZE + i *
+					REG_ADDR_MG_SIZE_OFFSET_FORMULA, read_size);
+			return true;
+		}
+	}
+
 	return false;
 }
 
 static void mvppnd_setup_mg_window(struct mvppnd_dev *ppdev, u8 mg_win,
-				   u32 base_addr, u32 size)
+				   u64 base_addr, u32 size)
 {
 	u32 target, control;
 
-	dev_dbg(ppdev->dev, "MG window %d: 0x%x, %d\n", mg_win,
+	dev_dbg(ppdev->dev, "MG window %d: 0x%llx, %d\n", mg_win,
 		base_addr, size);
 
 	mvppnd_init_target_and_control(ppdev, &target, &control, base_addr,
 				       size);
 
-	if (mvppnd_is_covered_by_mg(ppdev, mg_win, base_addr, size))
-		return; /* if CPSS already mapped these addresses avoid making another overlapping mapping */
-
 	/* Is oATU needed */
 	if ((ppdev->pdev.pdev) &&
-	    (ppdev->pdev.pdev->device != PCI_DEVICE_ID_ALDRIN2) &&
-	    ((base_addr & BIT(31)) != BIT(31)))
-		mvppnd_setup_oatu_window(ppdev, base_addr, size);
+	    (ppdev->pdev.pdev->device != PCI_DEVICE_ID_ALDRIN2) ) {
+		/* only if we don't have overlapping mapping, then make a new one: */
+		if (!mvppnd_handle_covered_by_oATU(ppdev, base_addr & 0xFFFFFFFF, size))
+			mvppnd_setup_oatu_window(ppdev, base_addr, size);
+	}
+
+	if (mvppnd_handle_covered_by_mg(ppdev, NUM_OF_MG_WINDOWS, base_addr, size))
+		return; /* if CPSS already mapped these addresses avoid making another overlapping mapping */
 
 	mvppnd_write_reg(ppdev, REG_ADDR_MG_BASE_ADDR + mg_win *
 			 REG_ADDR_MG_BASE_ADDR_OFFSET_FORMULA,
-			 base_addr | target);
+			 (base_addr & 0xFFFFFFFF) | target);
 	mvppnd_write_reg(ppdev, REG_ADDR_MG_SIZE + mg_win *
 			 REG_ADDR_MG_SIZE_OFFSET_FORMULA, size);
 	mvppnd_write_reg(ppdev, REG_ADDR_MG_HA + mg_win *
@@ -1047,7 +1149,7 @@ static int mvppnd_alloc_device_coherent(struct mvppnd_dev *ppdev)
 	/* Make sure address is aligned with the size */
 	size = ppdev->coherent.buf.dma % ppdev->coherent.buf.size;
 	if (size) {
-		/* 
+		/*
 		 * Allocate the difference between the requested
 		 * size and the allocated address misalignment.
 		 * This should make the next allocation start on the
@@ -1077,7 +1179,7 @@ static int mvppnd_alloc_device_coherent(struct mvppnd_dev *ppdev)
 			return -ENOMEM;
 		}
 
-		dma_free_coherent(ppdev->dev, size, v, d);
+		dma_free_coherent(ppdev->dev, filler_size, v, d);
 	}
 
 	if (ppdev->coherent.buf.dma % ppdev->coherent.buf.size) {
@@ -1153,7 +1255,7 @@ static int mvppnd_copy_skb_to_tx_buff(struct mvppnd_dev *ppdev,
 		       page_to_virt(skb_frag_page(frag)),
 		       skb_frag_size(frag));
 #else
-		WARN_ONCE("Older kernel, frags are not supported\n"
+		WARN_ONCE(1, "Older kernel, frags are not supported\n"
 #endif
 		sgb->mappings[i + 1] = ppdev->tx_buffs.dma + i *
 				       skb_frag_size(frag);
@@ -1333,7 +1435,13 @@ static int mvppnd_setup_rx_rings(struct mvppnd_dev *ppdev)
 	for (i = 0; i < NUM_OF_RX_QUEUES; i++)
 		if (ppdev->rx_queues[i])
 			mvppnd_enable_queue(ppdev, REG_ADDR_RX_QUEUE_CMD, i);
-
+	/*
+	 * AC5 in internal mode needs to be enabled twice for some reason,
+	 * this should not have any adverse effect on other packet processors:
+	 */
+	for (i = 0; i < NUM_OF_RX_QUEUES; i++)
+		if (ppdev->rx_queues[i])
+			mvppnd_enable_queue(ppdev, REG_ADDR_RX_QUEUE_CMD, i);
 	return 0;
 
 destroy_rings:
@@ -1482,7 +1590,7 @@ static void mvppnd_process_rx_buff(struct mvppnd_dev *ppdev,
 			redirect_to_tx = true;
 			break;
 		default:
-			WARN_ONCE("%s: Got invalid return value from process_rx\n",
+			WARN_ONCE(1, "%s: Got invalid return value from process_rx\n",
 				  DRV_NAME);
 			ppdev->sdev.flows[0]->ndev->stats.rx_dropped++;
 			return;
@@ -1503,7 +1611,7 @@ static void mvppnd_process_rx_buff(struct mvppnd_dev *ppdev,
 
 	print_dsa(ndev->name, "rx", buff + ETH_ALEN * 2);
 	if ( (rx_bytes < DSA_SIZE) || (rx_bytes > ppdev->max_pkt_sz) ) {
-		WARN_ONCE("Received packet with illegal size %d!!!\n", rx_bytes);
+		WARN_ONCE(1, "Received packet with illegal size %d!!!\n", rx_bytes);
 		return;
 	}
 
@@ -2056,18 +2164,20 @@ static ssize_t mvppnd_store_mac(struct kobject *kobj,
 	struct mvppnd_switch_flow *flow =
 		container_of(attr, struct mvppnd_switch_flow, attr_mac);
 	unsigned int mac[ETH_ALEN];
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5,15,0)
 	int i;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,0)
+	u8 mac_bytes[ETH_ALEN];
 #endif
 
 	sscanf(buf, "%x:%x:%x:%x:%x:%x\n", &mac[0], &mac[1], &mac[2], &mac[3],
 	       &mac[4], &mac[5]);
-
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,15,0)
 	for (i = 0; i < ETH_ALEN; i++)
 		flow->ndev->dev_addr[i] = mac[i];
 #else
-	dev_addr_mod(flow->ndev, 0, mac, ETH_ALEN);
+	for (i = 0; i < ETH_ALEN; i++)
+		mac_bytes[i] = (u8)mac[i];
+	dev_addr_mod(flow->ndev, 0, mac_bytes, ETH_ALEN);
 #endif
 
 	return count;
@@ -3242,7 +3352,7 @@ static void mvppnd_transmit_skb(struct sk_buff *skb)
 		case NF_STOLEN:
 			return;
 		default:
-			WARN_ONCE("%s: Got invalid return value from process_tx\n",
+			WARN_ONCE(1, "%s: Got invalid return value from process_tx\n",
 				  DRV_NAME);
 			ppdev->sdev.flows[0]->ndev->stats.rx_dropped++;
 			return;
@@ -3408,7 +3518,6 @@ int mvppnd_open(struct net_device *dev)
 	}
 
 	mvppnd_disable_tx_interrupts(ppdev);
-
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6,1,0)
 	netif_napi_add(dev, &ppdev->napi, mvppnd_poll,
 		       DEFAULT_NAPI_POLL_WEIGHT);
@@ -3489,7 +3598,7 @@ int mvppnd_stop(struct net_device *dev)
 
 	if (ppdev->rx_thread) {
 		kthread_stop(ppdev->rx_thread);
-		if (in_atomic()) 
+		if (in_atomic())
 			mdelay((RX_THREAD_UDELAY * 2)/1000);
 		else
 			msleep(10);
@@ -3721,7 +3830,6 @@ int mvppnd_create_netdev(struct mvppnd_dev *ppdev, const char *name, int port)
 		u8_flow_id = flow_id;
 		dev_addr_mod(ndev, 5, &u8_flow_id, 1);
 #endif
-
 		flow->config_tx_dsa[1] = flow->rx_dsa_val[1];
 		flow->config_tx_dsa[6] = flow->rx_dsa_val[6];
 		flow->config_tx_dsa[9] = flow->rx_dsa_val[9];
@@ -3871,10 +3979,10 @@ static int mvppnd_pci_probe(struct pci_dev *pdev,
 		goto disable_pci_device;
 	}
 
-	/* We want 32 bit address space */
-	rc = dma_set_mask(&pdev->dev, DMA_BIT_MASK(32));
+	/* We want 36 bit address space (32GB boards) */
+	rc = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(36));
 	if (rc) {
-		dev_err(&pdev->dev, "Fail to set 32bit DMA mask\n");
+		dev_err(&pdev->dev, "Fail to set 36bit DMA mask\n");
 		goto free_regions;
 	}
 
@@ -3958,8 +4066,14 @@ static const struct pci_device_id mvppnd_pci_tbl[] = {
 	  (kernel_ulong_t)&ac5p_private_data},
 	{ PCI_DEVICE(PCI_VENDOR_ID_MARVELL, PCI_DEVICE_ID_HARRIER), 0, 0,
 	  (kernel_ulong_t)&ac5p_private_data},
-	{ PCI_DEVICE(PCI_VENDOR_ID_MARVELL, PCI_DEVICE_ID_AC5X), 0, 0,
+	{ PCI_DEVICE(PCI_VENDOR_ID_MARVELL, PCI_DEVICE_ID_AC5X_1), 0, 0,
 	  (kernel_ulong_t)&ac5x_private_data},
+	{ PCI_DEVICE(PCI_VENDOR_ID_MARVELL, PCI_DEVICE_ID_AC5X_2), 0, 0,
+	  (kernel_ulong_t)&ac5x_private_data},
+	{ PCI_DEVICE(PCI_VENDOR_ID_MARVELL, PCI_DEVICE_ID_IML), 0, 0,
+	  (kernel_ulong_t)&ac5x_private_data},
+	{ PCI_DEVICE(PCI_VENDOR_ID_MARVELL, PCI_DEVICE_ID_AC5), 0, 0,
+	  (kernel_ulong_t)&ac5_private_data},
 	{ PCI_DEVICE(PCI_VENDOR_ID_MARVELL, PCI_DEVICE_ID_ALDRIN2), 0, 0, 0},
 	{ 0, 0, 0, 0, 0, 0, 0 }
 };
@@ -3996,6 +4110,8 @@ static int mvppnd_pdriver_probe(struct platform_device *pdev)
 {
 	struct mvppnd_dev *ppdev;
 	int rc;
+	u32 devid;
+	bool remap;
 
 	dev_info(&pdev->dev, "Using platform device %s\n", pdev->name);
 
@@ -4032,18 +4148,39 @@ static int mvppnd_pdriver_probe(struct platform_device *pdev)
 
 	dev_set_drvdata(&pdev->dev, ppdev);
 
+	do {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,6,0)
-	ppdev->regs = ioremap(ppdev->device_data->mg_reg_base,
+		ppdev->regs = ioremap(ppdev->device_data->mg_reg_base,
 #else
-	ppdev->regs = ioremap_nocache(ppdev->device_data->mg_reg_base,
+		ppdev->regs = ioremap_nocache(ppdev->device_data->mg_reg_base,
 #endif
-				      ATU_WIN_SIZE + 0x1);
-	if (!ppdev->regs) {
-		dev_err(ppdev->dev,
-			"Fail to remap to MG space, aborting.\n");
-		rc = -ENXIO;
-		goto destroy_netdev;
-	};
+					      ATU_WIN_SIZE + 0x1);
+		if (!ppdev->regs) {
+			dev_err(ppdev->dev,
+				"Fail to remap to MG space, aborting.\n");
+			rc = -ENXIO;
+			goto destroy_netdev;
+		};
+
+		/*
+		 * AC5 has new style MG0 at address 0x7f900000 like AC5X,
+		 * but this MG is not usable for SDMA.
+		 * In order to get MG usuable for SDMA on AC5, we need to
+		 * use the legacy MG at address zero.
+		 * Hence, we need to unmap the previous mapping and remap
+		 * again with the legacy MG.
+		 * Note that for device ID functionality, MG0 at 0x7f90000
+		 * is perfectly usable - only SDMA is not properly connected.
+		 */
+		devid = ioread32(ppdev->regs + REG_ADDR_DEVICE);
+		if ( (((devid >> 4) & 0xff00) == (PCI_DEVICE_ID_AC5 & 0xff00)) &&
+		     (ppdev->device_data->mg_reg_base != REG_ADDR_BASE_AC5) ) {
+			iounmap(ppdev->regs);
+			ppdev->device_data->mg_reg_base = REG_ADDR_BASE_AC5;
+			remap = true;
+		} else
+			remap = false;
+	} while (remap);
 
 	dev_info(ppdev->dev,
 		 "regs phys 0x%x, iomem %p, size %d\n",
@@ -4093,6 +4230,7 @@ static int mvppnd_pdriver_remove(struct platform_device *pdev)
 
 static const struct of_device_id mvppnd_of_match_ids[] = {
 	 { .compatible = "marvell,mvppnd", },
+	{}
 };
 
 static struct platform_driver mvppnd_platform_driver = {
@@ -4110,7 +4248,6 @@ int mvppnd_init(void)
 {
 	int rc;
 
-	pr_info("Version: %s\n", ETH_DRV_VER);
 #ifdef SUPPORT_PLATFORM_DEVICE
 	int err;
 
@@ -4120,6 +4257,7 @@ int mvppnd_init(void)
 	else
 		platdrv_registered = 1;
 #endif
+	pr_info("Version: %s\n", ETH_DRV_VER);
 	rc = pci_register_driver(&mvppnd_pci_driver);
 
 	return rc;
