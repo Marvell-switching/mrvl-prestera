@@ -269,6 +269,7 @@ static int mvDmaDrv_mmap(struct file *file, struct vm_area_struct *vma)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,11,0) && LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0)
 	int (*dma_configure)(struct device *dev);
 	int ret;
+#endif
 
 	if (!m->dev && !platdrv_dev) {
 		printk(KERN_ERR "%s: Nither PCI, nor Platform device is registered, cannot mmap\n",
@@ -278,7 +279,6 @@ static int mvDmaDrv_mmap(struct file *file, struct vm_area_struct *vma)
 
 	if (!m->dev && platdrv_dev)
 		m->dev = platdrv_dev;
-#endif
 
 	dev_info(m->dev, "%s(file=%p) data=%p LINUX_VMA_DMABASE=0x%lx\n",
 		 __func__, file, m, LINUX_VMA_DMABASE);
