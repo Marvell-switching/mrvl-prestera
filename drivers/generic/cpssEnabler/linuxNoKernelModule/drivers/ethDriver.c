@@ -182,7 +182,7 @@ static const unsigned long TX_QUEUE_SIZE = 10000;
 static const u16 DEFAULT_NAPI_POLL_WEIGHT = NAPI_POLL_WEIGHT * 4;
 static const u8 MAX_EMPTY_NAPI_POLL = 20;
 static const int RX_THREAD_UDELAY = 5000;
-static const u16 DEFAULT_ATU_WIN = 5;
+static const u16 DEFAULT_ATU_WIN = 3;
 /* MG windows - one for coherent and max 2 for streaming, indexes below */
 static const u8 DEFAULT_MG_WIN = 0xE;
 static const u8 MG_WIN_COHERENT_IDX = 0;
