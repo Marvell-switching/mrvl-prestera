@@ -762,6 +762,8 @@ static struct file_operations mvdma_fops = {
 
 void mvdma2_exit(void)
 {
+	mvdma_free_global_devs_mappings();
+	of_reserved_mem_device_release(mvdma_ctx->dev);
 	mvchrdev_cleanup(mvdma_ctx);
 
 #if defined(SUPPORT_PLATFORM_DEVICE)
@@ -770,9 +772,6 @@ void mvdma2_exit(void)
 
 	debugfs_remove(debugfs_mmaps);
 	debugfs_remove(debugfs_dir);
-
-	of_reserved_mem_device_release(mvdma_ctx->dev);
-	mvdma_free_global_devs_mappings();
 }
 
 static void mvdma_debugfs_print_mappings(struct seq_file *m,
