@@ -610,6 +610,24 @@ static struct file_operations mvIntDrv_fops = {
 
 void mvintdrv_exit(void)
 {
+	int slot;
+
+	struct interrupt_slot *sl;
+
+	/*
+	* Clean ready for reallocation irq entries and free them,
+	* in order to avoid kernel WARN on reboot
+	*/
+	for (slot = 0; slot < MAX_INTERRUPTS; slot++) {
+		sl = &(mvIntDrv_slots[slot]);
+		if (sl->state == IRQ_SLOT_STATE_READY_FOR_REALLOCATION) {
+			free_irq(sl->irq, (void*)&(sl->tasklet));
+			tasklet_kill(&(sl->tasklet));
+			sl->state = IRQ_SLOT_STATE_UNALLOCATED;
+			sl->irq = 0;
+		}
+	}
+
 	mvchrdev_cleanup(chrdrv_ctx);
 }
 

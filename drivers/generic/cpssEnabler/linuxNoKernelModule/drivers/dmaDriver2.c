@@ -534,6 +534,9 @@ static int mvdma_mmap(struct file *file, struct vm_area_struct *vma)
 	dev_dbg(mvdma_ctx->dev, "dma_mmap_coherent succeeds\n");
 #endif /* MMAP_USE_REMAP_PFN_RANGE */
 
+	if (!file->private_data)
+		file->private_data = dev_mappings;
+
 	return 0;
 }
 
@@ -599,6 +602,29 @@ static loff_t mvdma_lseek(struct file *file, loff_t off, int unused)
 		dev_mappings = (struct dev_mappings *)file->private_data;
 		if (!dev_mappings->global)
 			mvdma_free_dev_mappings(dev_mappings);
+		else {
+/*
+ * Process shutdown in x86, kernel 6.1.x will release the process mapping
+ * and pages. So just delete the structure holding the pointers to the
+ * allocated DMA memory:
+ */
+#if defined(CONFIG_X86)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,1,1)
+			struct list_head *p, *q;
+			struct dma_mapping *dma_mapping;
+
+			list_for_each_safe(p, q, &(dev_mappings->mappings)) {
+				dma_mapping = list_entry(p,  struct dma_mapping, list);
+				list_del(p);
+				kfree(dma_mapping);
+			}
+
+			list_del(&dev_mappings->global_dev_mappings);
+			kfree(dev_mappings);
+#endif
+#endif
+               }
+
 		file->private_data = NULL;
 
 		/* A way to let process shutdown gracefully */
@@ -697,6 +723,28 @@ static int mvdma_release(struct inode *inode, struct file *file)
 		dev_mappings = (struct dev_mappings *)file->private_data;
 		if (!dev_mappings->global)
 			mvdma_free_dev_mappings(dev_mappings);
+		else {
+/*
+ * Process shutdown in x86, kernel 6.1.x will release the process mapping
+ * and pages. So just delete the structure holding the pointers to the
+ * allocated DMA memory:
+ */
+#if defined(CONFIG_X86)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,1,1)
+			struct list_head *p, *q;
+			struct dma_mapping *dma_mapping;
+
+			list_for_each_safe(p, q, &(dev_mappings->mappings)) {
+				dma_mapping = list_entry(p,  struct dma_mapping, list);
+				list_del(p);
+				kfree(dma_mapping);
+			}
+
+			list_del(&dev_mappings->global_dev_mappings);
+			kfree(dev_mappings);
+#endif
+#endif
+		}
 		file->private_data = NULL;
 	}
 	mvdma_remove_open_file(file);
