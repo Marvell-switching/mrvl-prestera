@@ -70,6 +70,7 @@ struct sflow_config {
     char ifname[IFNAME_SIZE];
     unsigned int ing_rate;
     unsigned int egr_rate;
+    u8 nf;
     struct net_device *dev;
     struct list_head list;
 };
@@ -79,6 +80,7 @@ struct vlan_tag_config {
     char ifname[IFNAME_SIZE];
     unsigned int cmd;
     unsigned int pvid;
+    u8 nf;
     struct net_device *dev;
     struct list_head list;
 };
@@ -213,14 +215,18 @@ int sflow_register_nf(struct sflow_config *add)
         return rc;
     }
 
+    add->nf = 1;
     return rc;
 }
 
 void sflow_unregister_nf(struct sflow_config *del)
 {
-    sops.dev = del->dev;
-    dev_put(del->dev);
-    nf_unregister_net_hook(&init_net, &sops);
+    if(del->nf) {
+        sops.dev = del->dev;
+        dev_put(del->dev);
+        nf_unregister_net_hook(&init_net, &sops);
+    }
+    del->nf = 0;
 }
 
 /* Callback to update vlan tag as per config.
@@ -270,14 +276,18 @@ int vlantag_register_nf(struct vlan_tag_config *add)
         return rc;
     }
 
+    add->nf = 1;
     return rc;
 }
 
 void vlantag_unregister_nf(struct vlan_tag_config *del)
 {
-    vops.dev = del->dev;
-    dev_put(del->dev);
-    nf_unregister_net_hook(&init_net, &vops);
+    if(del->nf) {
+        vops.dev = del->dev;
+        dev_put(del->dev);
+        nf_unregister_net_hook(&init_net, &vops);
+    }
+    del->nf = 0;
 }
 
 
@@ -310,6 +320,48 @@ static void vlantag_config_free(void)
         kfree(del);
     }
 }
+
+static int sai_netdevice_event(struct notifier_block *unused,
+                 unsigned long event, void *ptr)
+{
+    struct net_device *dev = netdev_notifier_info_to_dev(ptr);
+    struct vlan_tag_config *vdel = NULL;
+    struct sflow_config *sdel = NULL;
+    struct list_head *tmp = NULL;
+
+    switch (event) {
+         case NETDEV_UNREGISTER:
+            mutex_lock(&sai_config_lock);
+            list_for_each(tmp, &vlantag_plist) {
+                vdel = list_entry(tmp, struct vlan_tag_config, list);
+
+                if (vdel->dev == dev) {
+                    vlantag_unregister_nf(vdel);
+                    list_del(&vdel->list);
+                    kfree(vdel);
+                    break;
+                }
+            }
+            list_for_each(tmp, &sflow_plist) {
+                sdel = list_entry(tmp, struct sflow_config, list);
+
+                if (sdel->dev == dev) {
+                    sflow_unregister_nf(sdel);
+                    list_del(&sdel->list);
+                    kfree(sdel);
+                    break;
+                }
+            }
+            mutex_unlock(&sai_config_lock);
+            break;
+    }
+
+    return NOTIFY_DONE;
+}
+
+static struct notifier_block sai_notifier = {
+    .notifier_call = sai_netdevice_event,
+};
 
 static int sai_open(struct inode *i, struct file *f)
 {
@@ -377,12 +429,12 @@ sai_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
             }
 
             list_add(&sadd->list, &sflow_plist);
-            mutex_unlock(&sai_config_lock);
 
             err = sflow_register_nf(sadd);
             if (err != 0) {
                 return err;
             }
+            mutex_unlock(&sai_config_lock);
 
             break;
         case SFLOW_INGRESS_DISABLE:
@@ -465,12 +517,12 @@ sai_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
             }
 
             list_add(&vadd->list, &vlantag_plist);
-            mutex_unlock(&sai_config_lock);
 
             err = vlantag_register_nf(vadd);
             if (err != 0) {
                 return err;
             }
+            mutex_unlock(&sai_config_lock);
 
             break;
         case VLAN_TAG_ORIGINAL:
@@ -628,6 +680,7 @@ static int __init sai_init(void)
     }
     rcu_assign_pointer(psample_group, group);
 
+    register_netdevice_notifier(&sai_notifier);
     return 0;
 
 out_proc:
@@ -647,6 +700,7 @@ static void __exit sai_exit(void)
 {
     struct psample_group *group;
 
+    unregister_netdevice_notifier(&sai_notifier);
     mutex_lock(&sai_config_lock);
     vlantag_config_free();
     sflow_config_free();
