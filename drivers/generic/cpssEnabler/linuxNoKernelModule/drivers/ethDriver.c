@@ -63,12 +63,14 @@ disclaimer.
 #include <linux/of_irq.h>
 #endif
 
-#define ETH_DRV_VER "1.03"
+#define ETH_DRV_VER "1.04"
 
 /* TODO List
 - Complete queue initialization (i.e. when CPSS skip init our queues)
 - Update "implementation" sections in the design document
 */
+
+#define VTAG32_PRESENT 0x80000000
 
 /* HW related constants */
 #define PCI_DEVICE_ID_FALCON  0x8400
@@ -3031,7 +3033,8 @@ static void mvppnd_stop_all_netdevs(struct mvppnd_dev *ppdev, bool going_down)
 /*********** tx functions ******************************/
 static int mvppnd_xmit_buf(struct mvppnd_dev *ppdev,
 			   struct mvppnd_switch_flow *flow, const char *macs,
-			   struct mvppnd_dma_sg_buf *sgb)
+			   struct mvppnd_dma_sg_buf *sgb,
+			   u32 vtag32)
 {
 	bool sdma_took, wait_too_long;
 	size_t wr_ptr, wr_ptr_first;
@@ -3040,6 +3043,7 @@ static int mvppnd_xmit_buf(struct mvppnd_dev *ppdev,
 	unsigned long jiffs; /* Wait for SDMA to take the desc */
 	int data_ptr;
 	int ret;
+	u8 *dsa_ptr;
 
 	if (!sgb->mappings[0])
 		return -EINVAL;
@@ -3062,6 +3066,20 @@ static int mvppnd_xmit_buf(struct mvppnd_dev *ppdev,
 	/* DSA */
 	print_dsa(flow->ndev->name, "tx", (u8 *)flow->config_tx_dsa);
 	memcpy(ppdev->dsa.virt, flow->config_tx_dsa, flow->config_tx_dsa_size);
+	dsa_ptr = (u8 *)ppdev->dsa.virt;
+	if ( (!(*dsa_ptr & 0x20)) && (vtag32 & VTAG32_PRESENT) ) {
+		/*
+		 * if user did not define vlan tag in DSA tag, but incoming
+		 * packet has a tag, then copy the tag from the skb to the DSA tag.
+		 * So if the user wants to pass both untagged and tagged data,
+		 * he needs to define the DSA tag as untagged (which is the default).
+		 */
+		*dsa_ptr |= 0x20; /* target tagged with VLAN */
+		dsa_ptr[2] = ((vtag32 >> 8) & 0xe0) |
+				0x10 /* another DSA word exists - must for eDSA */ |
+				((vtag32 & 0xf00) >> 8);
+		dsa_ptr[3] = vtag32 & 0xff;
+	}
 	ppdev->tx_queue.ring.descs[wr_ptr]->buf_addr = ppdev->dsa.dma;
 	TX_DESC_SET_BYTE_CNT(ppdev->tx_queue.ring.descs[wr_ptr]->bc,
 			     flow->config_tx_dsa_size);
@@ -3329,6 +3347,8 @@ static void mvppnd_transmit_skb(struct sk_buff *skb)
 	struct mvppnd_dev *ppdev = flow->ppdev;
 	struct mvppnd_dma_sg_buf sgb = {};
 	int rc;
+	u16 vlan_tag = 0;
+	u32 vtag32 = 0;
 
 	/*
 	dev_dbg(&ppdev->pdev->dev, "Got packet to transmit, len %d (head %d)\n",
@@ -3359,6 +3379,11 @@ static void mvppnd_transmit_skb(struct sk_buff *skb)
 		};
 	}
 
+	if (skb_vlan_tagged(skb)) {
+		vlan_get_tag(skb, &vlan_tag);
+		vtag32 = VTAG32_PRESENT | (u32)vlan_tag;
+	}
+
 	rc = mvppnd_copy_skb_to_tx_buff(ppdev, skb, &sgb);
 	if (rc) {
 		dev_dbg(ppdev->dev, "Fail to map skb %p\n",
@@ -3366,7 +3391,7 @@ static void mvppnd_transmit_skb(struct sk_buff *skb)
 		return;
 	}
 
-	rc = mvppnd_xmit_buf(ppdev, flow, skb->data, &sgb);
+	rc = mvppnd_xmit_buf(ppdev, flow, skb->data, &sgb, vtag32);
 	if (rc > 0) {
 		mvppnd_inc_stat(ppdev, STATS_TX_PACKETS, 1);
 		flow->ndev->stats.tx_packets++;
