@@ -3382,6 +3382,8 @@ static void mvppnd_transmit_skb(struct sk_buff *skb)
 	if (skb_vlan_tagged(skb)) {
 		vlan_get_tag(skb, &vlan_tag);
 		vtag32 = VTAG32_PRESENT | (u32)vlan_tag;
+                memmove(skb->data + VLAN_HLEN, skb->data, 2 * ETH_ALEN);
+                skb_pull(skb, VLAN_HLEN);
 	}
 
 	rc = mvppnd_copy_skb_to_tx_buff(ppdev, skb, &sgb);
