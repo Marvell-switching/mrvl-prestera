@@ -206,6 +206,7 @@ disclaimer.
 #endif
 
 #define MV_DMA_ALLOC_FLAGS GFP_DMA32 | GFP_NOFS
+#define MAX_DMA_ALLOC_RETRIES   10
 
 /* Character device context */
 static struct mvchrdev_ctx *chrdrv_ctx;
@@ -234,6 +235,8 @@ struct dma_mapping {
 	struct pci_dev *pdevs_list[4];
 	struct delayed_work free_mem_delayed;
 };
+
+static struct dma_mapping non_aligned_dma_arr[MAX_DMA_ALLOC_RETRIES*2];
 
 static struct dma_mapping *shared_dmaBlock;
 static struct semaphore mvdma_sem;
@@ -266,9 +269,11 @@ static int mvDmaDrv_mmap(struct file *file, struct vm_area_struct *vma)
 {
 	struct dma_mapping *m = (struct dma_mapping *)file->private_data;
 	u64 aligned = 0;
+	int iter = 0;
+	int failed_alloc_count = 0;
+	int ret  = 0;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,11,0) && LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0)
 	int (*dma_configure)(struct device *dev);
-	int ret;
 #endif
 
 	if (!m->dev && !platdrv_dev) {
@@ -355,61 +360,71 @@ static int mvDmaDrv_mmap(struct file *file, struct vm_area_struct *vma)
 			return -ENXIO;
 		}
 
-		/* If allocated physical address (m->dma) is not aligned with
-		   size, which is a Prestera req, for example 0xb0500000 not
-		   aligned with 0x200000 do:
-		   1. Free DMA
-		   2. Alloc (PHY mod size) up to alignment - 0x100000 in our
-		      case
-		   3. Alloc original size (0x200000)
-		   4. free (2)
-		   5. Check if aligned */
-
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(3,15,0))
 		aligned = (m->dma % m->size);
 #else
 		aligned = mvDmaDrv_modulo(m->dma, m->size);
 #endif
 		if (aligned) {
-			struct dma_mapping m_1 = *m;
-			m_1.size = m->size - aligned;
+			/* If allocated physical address (m->dma) is not aligned with
+			   size, which is a Prestera req, for example 0xb0500000 not
+			   aligned with 0x200000 do:
+			   1. Free DMA
+			   2. Alloc (PHY mod size) up to alignment - 0x100000 in our
+			   case
+			   3. Alloc original size (0x200000)
+			   4. free (2)
+			   5. Check if aligned */
 
-			dev_info(m->dev,
-				"dma_alloc_coherent is not aligned. Reallocating\n");
-			free_dma_block(m);
-
-			m_1.virt = dma_alloc_coherent(m_1.dev, m_1.size,
-						      &(m_1.dma),
-						      MV_DMA_ALLOC_FLAGS);
-			if (!m_1.virt) {
-				dev_err(m->dev,
-					"dma_alloc_coherent failed to allocate 0%x bytes\n",
-					(unsigned) m_1.size);
-				return -ENXIO;
-			}
-
-			m->virt = dma_alloc_coherent(m->dev, m->size, &(m->dma),
-						     MV_DMA_ALLOC_FLAGS);
-			free_dma_block(&m_1);
-			if (!m->virt) {
-				dev_err(m->dev,
-					"dma_alloc_coherent failed to allocate 0%x bytes\n",
-					(unsigned)m->size);
-				return -ENXIO;
-			}
+			for (iter = 0; iter < MAX_DMA_ALLOC_RETRIES; iter++)
+			{
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(3,15,0))
-			aligned = (m->dma % m->size);
+				aligned = (m->dma % m->size);
 #else
-			aligned = mvDmaDrv_modulo(m->dma, m->size);
+				aligned = mvDmaDrv_modulo(m->dma, m->size);
 #endif
-			if (aligned) {
-				dev_err(m->dev,
-					"dma_alloc_coherent failed to allocate aligned size of 0x%x for phys0x%lx\n",
-					(unsigned)m->size,
-					(unsigned long)m->dma);
-				free_dma_block(m);
-				return -ENXIO;
+
+				if (aligned) {
+					struct dma_mapping m_temp = *m;
+					non_aligned_dma_arr[failed_alloc_count++] = m_temp;
+					ret = -ENXIO;
+
+					m_temp.size = m->size - aligned;
+					m_temp.virt = dma_alloc_coherent (m_temp.dev, m_temp.size, &(m_temp.dma), MV_DMA_ALLOC_FLAGS);
+
+					if (! m_temp.virt)
+					{
+						break;
+					}
+
+					non_aligned_dma_arr[failed_alloc_count++] = m_temp;
+
+					m->virt = dma_alloc_coherent(m->dev, m->size, &(m->dma), MV_DMA_ALLOC_FLAGS);
+					if (!m->virt) {
+						dev_err(m->dev, "failed to alloc \n");
+						ret = -ENXIO;
+						break;
+					}
+				}
+				else
+				{
+					ret = 0;
+					break;
+				}
 			}
+
+
+			printk("dma_alloc_coherent() retries count. %d.\n", failed_alloc_count);
+
+			for (iter = 0; iter < failed_alloc_count; iter++)
+			{
+				free_dma_block(&non_aligned_dma_arr[iter]);
+			}
+		}
+
+		if (ret) {
+			dev_err(m->dev, "dma_alloc_coherent() failed. ret=%d\n", ret);
+			return ret;
 		}
 
 		dev_info(m->dev, "dma_alloc_coherent virt=%p dma=0x%llx\n",
