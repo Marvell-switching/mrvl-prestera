@@ -105,6 +105,7 @@ disclaimer.
 #include <linux/list.h>
 #include <linux/debugfs.h>
 #include <linux/sched.h>
+#include <linux/mm.h>
 
 #if (LINUX_VERSION_CODE > KERNEL_VERSION(3,14,79))
 #if defined(CONFIG_OF)
@@ -215,7 +216,7 @@ static void mvdma_free_dma_mapping(struct device *dev,
 	for (p = mapping->dma;
 	     p < (mapping->dma + mapping->size);
 	     p += PAGE_SIZE)
-		if (PageReserved((struct page *)phys_to_page(p))) {
+		if (PageReserved((struct page *)pfn_to_page(__phys_to_pfn(p)))) {
 			dev_err(dev, "Reserved memory@%llx, cannot free!\n",
 				mapping->dma);
 			return;
