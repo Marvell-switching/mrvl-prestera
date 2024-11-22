@@ -215,13 +215,14 @@ static irqreturn_t prestera_tl_ISR(int irq, void *tl)
 
 	BUG_ON(!sl);
 
-	if (unlikely((sl->state == IRQ_SLOT_STATE_ALLOCATED))) /* handle last interrupt after process termination */
-		atomic_dec(&sl->depth);
+	/* handle last interrupt after process termination
+	 * disregarding to (sl->state==IRQ_SLOT_STATE_ALLOCATED)
+	 */
+	atomic_dec(&sl->depth);
 	/* Disable the interrupt vector */
 	disable_irq_nosync(irq);
 	/* Enqueue the PP task BH in the tasklet */
-	if (unlikely((sl->state == IRQ_SLOT_STATE_ALLOCATED))) /* handle last interrupt after process termination */
-		tasklet_hi_schedule((struct tasklet_struct *)tl);
+	tasklet_hi_schedule((struct tasklet_struct *)tl);
 
 	return IRQ_HANDLED;
 }
@@ -541,7 +542,7 @@ static ssize_t mvIntDrv_write(struct file *f, const char *buf, size_t siz, loff_
 {
 	struct interrupt_slot *sl;
 	unsigned int irq = -1;
-	char cmdBuf[6];
+	char cmdBuf[6] = {0};
 	int slot;
 
 	/* Write 2 bytes:
