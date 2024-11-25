@@ -215,14 +215,13 @@ static irqreturn_t prestera_tl_ISR(int irq, void *tl)
 
 	BUG_ON(!sl);
 
-	/* handle last interrupt after process termination
-	 * disregarding to (sl->state==IRQ_SLOT_STATE_ALLOCATED)
-	 */
-	atomic_dec(&sl->depth);
+	if (unlikely((sl->state == IRQ_SLOT_STATE_ALLOCATED))) /* handle last interrupt after process termination */
+		atomic_dec(&sl->depth);
 	/* Disable the interrupt vector */
 	disable_irq_nosync(irq);
 	/* Enqueue the PP task BH in the tasklet */
-	tasklet_hi_schedule((struct tasklet_struct *)tl);
+	if (unlikely((sl->state == IRQ_SLOT_STATE_ALLOCATED))) /* handle last interrupt after process termination */
+		tasklet_hi_schedule((struct tasklet_struct *)tl);
 
 	return IRQ_HANDLED;
 }
