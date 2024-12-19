@@ -181,7 +181,7 @@ enum {
 static const unsigned long TX_WAIT_FOR_CPU_OWENERSHIP_USEC = 100000;
 /* How many SKBs we allow to have in our TX ring */
 static const unsigned long TX_QUEUE_SIZE = 10000;
-static const u16 DEFAULT_NAPI_POLL_WEIGHT = NAPI_POLL_WEIGHT * 4;
+static const u16 DEFAULT_NAPI_POLL_WEIGHT = NAPI_POLL_WEIGHT;
 static const u8 MAX_EMPTY_NAPI_POLL = 20;
 static const int RX_THREAD_UDELAY = 5000;
 static const u16 DEFAULT_ATU_WIN = 3;
