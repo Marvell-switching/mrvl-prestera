@@ -605,7 +605,11 @@ static int __init sai_init(void)
 
     major = err;
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,4,0)
     sai_class = class_create(THIS_MODULE, SAI_NAME);
+#else
+    sai_class = class_create(SAI_NAME);
+#endif
     if (IS_ERR(sai_class)) {
         err = PTR_ERR(sai_class);
         goto out_chrdev;

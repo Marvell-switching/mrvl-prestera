@@ -51,16 +51,18 @@ struct mvchrdev_ctx {
 	int minor;
 };
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,32)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3,4,69)
+# if LINUX_VERSION_CODE < KERNEL_VERSION(6,4,0)
 static char *mvchrdev_devnode(struct device *dev, umode_t *mode)
+# else
+static char *mvchrdev_devnode(const struct device *dev, umode_t *mode)
+# endif
 #else /* < 3.4.69 */
 static char *mvchrdev_devnode(struct device *dev, mode_t *mode)
 #endif /* < 3.4.69 */
 {
 	return kasprintf(GFP_KERNEL, "%s", dev->kobj.name);
 }
-#endif /* >= 2.6.32 */
 
 static void mvchrdev_cleanup(struct mvchrdev_ctx *ctx)
 {
@@ -107,15 +109,18 @@ static struct mvchrdev_ctx *mvchrdev_init(const char *name,
 		goto err_unreg_drv;
 	}
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,4,0)
 	ctx->class = class_create(THIS_MODULE, name);
+#else
+	ctx->class = class_create(name);
+#endif
 	if (IS_ERR(ctx->class)) {
 		pr_err("%s: Fail to create class (%d)\n", name, rc);
 		goto err_del_cdev;
 	}
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,32)
 	ctx->class->devnode = mvchrdev_devnode;
-#endif
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,27)
 	ctx->dev = device_create(ctx->class, NULL, dev, NULL, name);
 #else

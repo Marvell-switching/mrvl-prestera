@@ -160,6 +160,10 @@ MODULE_PARM_DESC(rx_counter_dump, "Counter, when exceeds print message");
 
 struct rx_context rx_ctx = {};
 
+int process_rx(struct net_device *ndev, unsigned char *data, int *sz,
+		int max_sz);
+int process_tx(struct net_device *ndev, struct sk_buff *skb);
+
 /**
 * @internal print_buf function
 * @endinternal

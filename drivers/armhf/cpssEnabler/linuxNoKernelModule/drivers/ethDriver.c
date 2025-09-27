@@ -409,6 +409,13 @@ struct device_private_data falcon_private_data = {REG_ADDR_BASE_FALCON};
 struct device_private_data ac5p_private_data = {REG_ADDR_BASE_AC5P};
 struct device_private_data ac5x_private_data = {REG_ADDR_BASE_AC5X};
 
+int mvppnd_poll(struct napi_struct *napi, int budget);
+void mvppnd_free_wq(struct mvppnd_dev *ppdev);
+int mvppnd_open(struct net_device *dev);
+int mvppnd_stop(struct net_device *dev);
+int mvppnd_init(void);
+void mvppnd_exit(void);
+
 /* 
  * netif_receive_skb_list() was only introduced in
  * kernel 4.19 . Make a naive implementation of
@@ -4065,7 +4072,11 @@ out:
 	return 0;
 };
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,12,0)
+static void mvppnd_pdriver_remove(struct platform_device *pdev)
+#else
 static int mvppnd_pdriver_remove(struct platform_device *pdev)
+#endif
 {
 	struct mvppnd_dev *ppdev;
 
@@ -4073,7 +4084,11 @@ static int mvppnd_pdriver_remove(struct platform_device *pdev)
 
 	ppdev = (struct mvppnd_dev *)dev_get_drvdata(&pdev->dev);
 	if (!ppdev)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,12,0)
 		return 0;
+#else
+		return;
+#endif
 
 	ppdev->going_down = true;
 
@@ -4088,7 +4103,9 @@ static int mvppnd_pdriver_remove(struct platform_device *pdev)
 
 	dev_info(&pdev->dev, "Detached from device\n");
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,12,0)
 	return 0;
+#endif
 }
 
 static const struct of_device_id mvppnd_of_match_ids[] = {

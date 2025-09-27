@@ -60,6 +60,10 @@ disclaimer.
 #include <linux/list.h>
 #include <linux/delay.h>
 
+void mvPresteraBh(unsigned long data);
+void mvintdrv_exit(void);
+int mvintdrv_init(void);
+
 /* Character device context */
 static struct mvchrdev_ctx *chrdrv_ctx;
 static struct semaphore mvint_pci_devs_sem;

@@ -66,6 +66,9 @@ static struct mvchrdev_ctx *chrdrv_ctx;
 
 int mvMbusDrvDevId = 0;
 
+void mvmbusdrv_exit(void);
+int mvmbusdrv_init(void);
+
 static int mvMbusDrv_mmap(struct file * file, struct vm_area_struct *vma)
 {
 	struct mv_resource_info res = {0};
@@ -91,7 +94,11 @@ static int mvMbusDrv_mmap(struct file * file, struct vm_area_struct *vma)
 		return -ENXIO;
 	}
 	/* VM_IO for I/O memory */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,6,0)
 	vma->vm_flags |= VM_IO;
+#else
+	vm_flags_set(vma, VM_IO);
+#endif
 	/* disable caching on mapped memory */
 	vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
 	vma->vm_pgoff = res.start >> PAGE_SHIFT;
