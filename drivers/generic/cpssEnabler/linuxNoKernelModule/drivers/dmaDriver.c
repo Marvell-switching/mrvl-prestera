@@ -116,6 +116,9 @@ disclaimer.
 
 #define MV_DMA_ALLOC_FLAGS GFP_DMA32 | GFP_NOFS
 
+void mvdmadrv_exit(void);
+int mvdmadrv_init(void);
+
 /* Character device context */
 static struct mvchrdev_ctx *chrdrv_ctx;
 /* Did we successfully registered as platform driver? zero means yes */
@@ -446,13 +449,19 @@ static int mvdmadrv_pdriver_probe(struct platform_device *pdev)
 	return 0;
 };
 
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6,12,0))
+static void mvdmadrv_pdriver_remove(struct platform_device *pdev)
+#else
 static int mvdmadrv_pdriver_remove(struct platform_device *pdev)
+#endif
 {
 	BUG_ON(!platdrv_registered);
 
 	of_reserved_mem_device_release(&pdev->dev);
 
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(6,12,0))
 	return 0;
+#endif
 }
 
 static const struct of_device_id mvdmadrv_of_match_ids[] = {
@@ -492,6 +501,7 @@ void mvdmadrv_exit(void)
 		kfree(shared_dmaBlock);
 	}
 }
+
 int mvdmadrv_init(void)
 {
 #ifdef SUPPORT_PLATFORM_DEVICE

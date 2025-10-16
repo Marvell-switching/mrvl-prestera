@@ -164,6 +164,9 @@ struct list_head opened_files; /* List of file_desc (for debugfs) */
 /* debugfs dir and mmaps file */
 struct dentry *debugfs_dir, *debugfs_mmaps;
 
+void mvdma2_exit(void);
+int mvdma2_init(void);
+
 /* Add filep to opened_files */
 static void mvdma_add_open_file(struct file *file)
 {
@@ -777,13 +780,20 @@ static int mvdma_pdriver_probe(struct platform_device *pdev)
 	return 0;
 };
 
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6,12,0))
+static void mvdma_pdriver_remove(struct platform_device *pdev)
+#else
 static int mvdma_pdriver_remove(struct platform_device *pdev)
+#endif
 {
 	BUG_ON(!platform_dev_mappings);
 #if (LINUX_VERSION_CODE > KERNEL_VERSION(3,19,8))
 	of_reserved_mem_device_release(&pdev->dev);
 #endif
+
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(6,12,0))
 	return 0;
+#endif
 }
 
 static const struct of_device_id mvdma_of_match_ids[] = {

@@ -45,6 +45,9 @@
 
 #include <linux/pci.h>
 
+void mvpci_exit(void);
+int mvpci_init(void);
+
 static int mvpcidrv_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 {
 	int rc;
