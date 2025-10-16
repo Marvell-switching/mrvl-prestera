@@ -181,16 +181,16 @@ static void print_buf(const char *title, const unsigned char *data, size_t len)
 	size_t sz;
 	char *b;
 	int i;
-
+	size_t n = 0;
 	sz = (len * 3) + 4 + strlen(title) + 1 + 1;
 
 	b = kmalloc(sz, GFP_KERNEL);
 	if (!b)
 		return;
 
-	sprintf(b, "len %ld:", len);
+	n += sprintf(b, "len %ld:", len);
 	for (i = 0; i < len; i++)
-		sprintf(b, "%s %.2x", b, data[i]);
+		n += sprintf(b, " %.2x", data[i]);
 	pr_info("%s: %s\n", title, b);
 
 	/*
