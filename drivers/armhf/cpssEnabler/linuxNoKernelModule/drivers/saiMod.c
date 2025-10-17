@@ -93,6 +93,11 @@ struct dsa_128bit_var {
     u64 high, low;
 };
 
+int sflow_register_nf(struct sflow_config *add);
+void sflow_unregister_nf(struct sflow_config *del);
+int vlantag_register_nf(struct vlan_tag_config *add);
+void vlantag_unregister_nf(struct vlan_tag_config *del);
+
 /*
  * Sflow DSA tags:
  * CPSS CPUCode Ingress - CPSS_HAL_CTRLPKT_CPU_CODE_SAMPLE_USER_DEFINE_0 to

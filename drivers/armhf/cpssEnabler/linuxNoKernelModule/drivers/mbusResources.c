@@ -272,8 +272,10 @@ int mvGetSip6ResourceInfo(int resource, int device, struct mv_resource_info *res
 
 int mvGetDeviceId(void)
 {
+#ifdef __aarch64__
 	struct resource *dev_id_reg_res;
 	void *dev_id_reg;
+#endif
 	unsigned int dev_id = 0;
 
 	struct device_node *root;
