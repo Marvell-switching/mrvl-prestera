@@ -103,6 +103,13 @@ static bool msi_used;
 
 struct pci_dev *pci_devs_list[MAX_PCI_DEVS];
 
+/* Prototypes required to avoid warnings */
+void enable_irq_wrapper(unsigned int irq);
+void prt_msi_state(char *msg, unsigned bus, unsigned device, unsigned func);
+int mvintdrv_add_pci_dev_to_ar(struct pci_dev *dev);
+struct pci_dev *mvintdrv_get_pci_dev_from_ar(void);
+
+
 void enable_irq_wrapper(unsigned int irq)
 {
 	struct irq_desc *desc = irq_data_to_desc(irq_get_irq_data(irq));

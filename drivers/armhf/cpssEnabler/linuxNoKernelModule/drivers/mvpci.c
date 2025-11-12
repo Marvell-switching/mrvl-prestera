@@ -70,8 +70,18 @@ static void mvpcidrv_remove(struct pci_dev *pdev)
 	pci_disable_device(pdev);
 }
 
+#define MARVELL_VENDOR_ID    0x11ab
+#define MARVELL_DEVICE_C804  0xc804
+
+static const struct pci_device_id mvpcidrv_pci_ids[] = {
+	{ PCI_DEVICE(MARVELL_VENDOR_ID, MARVELL_DEVICE_C804) },
+	/*{ PCI_DEVICE(MARVELL_VENDOR_ID, PCI_ANY_ID) }, */
+	{ 0, }
+};
+
 static struct pci_driver mvpcidrv_pci_driver = {
 	.name		= MV_DRV_NAME,
+	.id_table	= mvpcidrv_pci_ids,
 	.probe		= mvpcidrv_probe,
 	.remove		= mvpcidrv_remove,
 	.driver.pm	= NULL,
