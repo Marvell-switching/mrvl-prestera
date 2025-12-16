@@ -4021,13 +4021,21 @@ static int mvppnd_pci_probe(struct pci_dev *pdev,
 		goto disable_pci_device;
 	}
 
+#if defined(CONFIG_X86)
+	/* We want 32 bit address space */
+	rc = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
+	if (rc) {
+		dev_err(&pdev->dev, "Fail to set 32bit DMA mask\n");
+		goto free_regions;
+	}
+#else
 	/* We want 36 bit address space (32GB boards) */
 	rc = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(36));
 	if (rc) {
 		dev_err(&pdev->dev, "Fail to set 36bit DMA mask\n");
 		goto free_regions;
 	}
-
+#endif
 	pci_set_master(pdev);
 
 	ppdev->irq = ppdev->pdev.pdev->irq;
