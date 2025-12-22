@@ -24,6 +24,8 @@ override_dh_auto_build:
 	@if [ "$(CONFIGURED_ARCH)" = "amd64" ]; then \
 		echo "platform/$(CONFIGURED_ARCH)/common/usr/local/bin/* /usr/local/bin" > \
 		    ${MOD_SRC_DIR}/debian/mrvlprestera.install; \
+		echo "platform/common/* /" >> \
+		    ${MOD_SRC_DIR}/debian/mrvlprestera.install; \
 	else \
 		sed "s/ARCH/${CONFIGURED_ARCH}/g" \
 		    ${MOD_SRC_DIR}/debian/mrvlprestera.install.template \
