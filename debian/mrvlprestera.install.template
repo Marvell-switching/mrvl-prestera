@@ -1,2 +1,3 @@
+platform/common/* /
 platform/ARCH/common/boot/*.dtb /boot
 platform/ARCH/common/usr/local/bin/* /usr/local/bin

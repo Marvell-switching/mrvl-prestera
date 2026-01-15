@@ -1,0 +1,5 @@
+[Unit]
+Description=SONiC extended target starting sonic.target after pre.service
+Requires=sonic-pre.service
+After=sonic-pre.service
+Wants=sonic.target
