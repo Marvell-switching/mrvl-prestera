@@ -1,0 +1,14 @@
+[Unit]
+Description=SONiC pre-start service
+Before=sonic.target
+ConditionPathExists=/usr/local/bin/sonic-pre.sh
+DefaultDependencies=no
+After=local-fs.target
+Requires=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/sonic-pre.sh
+RemainAfterExit=yes
+TimeoutStartSec=0
