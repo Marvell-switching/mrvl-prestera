@@ -59,6 +59,7 @@ disclaimer.
 #include <linux/irq.h>
 #include <linux/list.h>
 #include <linux/delay.h>
+#include <linux/sched/signal.h>
 
 /* Character device context */
 static struct mvchrdev_ctx *chrdrv_ctx;
@@ -74,6 +75,7 @@ enum irq_slot_state {
 
 struct interrupt_slot {
 	atomic_t		depth; /* keep track of enable/disable */
+	atomic_t		cnt_missed; /* count of interrupts detected by timeout */
 	unsigned int		irq;
 	struct semaphore	sem; /* The semaphore on which the user waits */
 	struct semaphore	close_sem; /* Sync disconnect with read */
@@ -98,6 +100,11 @@ static bool msi_used;
 #define MAX_PCI_DEVS 8
 
 struct pci_dev *pci_devs_list[MAX_PCI_DEVS];
+
+/* module parameter which controls the no interrupt timeout
+   for generating a fake interrupt: */
+static int intdrv_timeout = 10000;
+module_param(intdrv_timeout,int,0660);
 
 void enable_irq_wrapper(unsigned int irq)
 {
@@ -148,6 +155,30 @@ void prt_msi_state(char *msg, unsigned bus, unsigned device, unsigned func)
 				  );
 		}
 		pci_dev_put(pdev);
+	}
+}
+
+bool get_pci_int_state(unsigned slot)
+{
+	struct pci_dev *pdev;
+	u32 cmd_status_dword;
+
+	if (slot >= MAX_PCI_DEVS)
+		return false;
+
+	pdev = pci_devs_list[slot];
+
+	if (pdev) {
+		pci_dev_get(pdev);
+		pci_read_config_dword(pdev, PCI_COMMAND, &cmd_status_dword);
+		pci_dev_put(pdev);
+		if ((cmd_status_dword >> 16) & PCI_STATUS_INTERRUPT) {
+			pr_err("%s: Slot %u pdev %lx val %x\n", __func__,
+			       slot, (unsigned long)pdev, cmd_status_dword);
+		}
+		return !!((cmd_status_dword >> 16) & PCI_STATUS_INTERRUPT);
+	} else {
+		return false;
 	}
 }
 
@@ -253,6 +284,7 @@ static unsigned int alloc_interrupt_slot(unsigned int irq)
 			   IRQ again. IRQ is already disabled so no need to disable it now: */
 			sl = &(mvIntDrv_slots[slot]);
 			sl->irq = irq;
+			atomic_set(&sl->cnt_missed, 0);
 			pr_info("Performing irq %d reallocation...\n", sl->irq);
 			sema_init(&sl->sem, 0);
 			sema_init(&sl->close_sem, 0);
@@ -269,6 +301,7 @@ static unsigned int alloc_interrupt_slot(unsigned int irq)
 		if (mvIntDrv_slots[slot].state == IRQ_SLOT_STATE_UNALLOCATED) {
 			sl = &(mvIntDrv_slots[slot]);
 			sl->irq = irq;
+			atomic_set(&sl->cnt_missed, 0);
 			sema_init(&sl->sem, 0);
 			sema_init(&sl->close_sem, 0);
 			up(&sl->close_sem);
@@ -284,8 +317,8 @@ static unsigned int alloc_interrupt_slot(unsigned int irq)
 			prt_msi_state("alloc after req", 1, 0 ,0);
 			prt_msi_state("alloc after req", 2, 0 ,0);
 			disable_irq(irq);
-            prt_msi_state("alloc after dis", 1, 0 ,0);
-            prt_msi_state("alloc after dis", 2, 0 ,0);
+			prt_msi_state("alloc after dis", 1, 0 ,0);
+			prt_msi_state("alloc after dis", 2, 0 ,0);
 
 			sl->state = IRQ_SLOT_STATE_ALLOCATED;
 			return slot;
@@ -668,7 +701,7 @@ static ssize_t mvIntDrv_write(struct file *f, const char *buf, size_t siz, loff_
 static ssize_t mvIntDrv_read(struct file *f, char *buf, size_t siz, loff_t *off)
 {
 	struct interrupt_slot *sl;
-	int slot = (int)siz - 1;
+	int ret, slot = (int)siz - 1;
 
 	if (slot < 0 || slot >= MAX_INTERRUPTS)
 		return -EINVAL;
@@ -688,17 +721,43 @@ static ssize_t mvIntDrv_read(struct file *f, char *buf, size_t siz, loff_t *off)
 	prt_msi_state("read after irq enable", 1, 0 ,0);
 	prt_msi_state("read after irq enable", 2, 0 ,0);
 
-	if (down_interruptible(&sl->sem)) {
-		down(&sl->close_sem);
-		atomic_dec(&sl->depth);
-		prt_msi_state("read before irq disable", 1, 0 ,0);
-		prt_msi_state("read before irq disable", 2, 0 ,0);
-		disable_irq(sl->irq);
-		prt_msi_state("read after irq disable", 1, 0 ,0);
-		prt_msi_state("read after irq disable", 2, 0 ,0);
-		up(&sl->close_sem);
-		return -EINTR;
+	/* wait for bottom half to wake us, with timeout: */
+	while (atomic_read(&sl->cnt_missed) <= 1) {
+		ret = down_timeout(&sl->sem, msecs_to_jiffies(intdrv_timeout));
+
+		if (ret) { /* wait for semaphore - timeout expired / signal */
+			if (get_pci_int_state(slot)) {
+				atomic_inc(&sl->cnt_missed);
+			}
+
+			if ( (ret == -ETIME) &&
+			     (atomic_read(&sl->cnt_missed) <= 1) &&
+			     (!signal_pending(current)) ) {
+				continue;
+			}
+
+			/* wait for semaphore - timeout expired twice or signal */
+			atomic_set(&sl->cnt_missed, 0);
+			down(&sl->close_sem);
+			atomic_dec(&sl->depth);
+			prt_msi_state("read before irq disable", 1, 0 ,0);
+			prt_msi_state("read before irq disable", 2, 0 ,0);
+			disable_irq(sl->irq);
+			prt_msi_state("read after irq disable", 1, 0 ,0);
+			prt_msi_state("read after irq disable", 2, 0 ,0);
+			up(&sl->close_sem);
+			if ( (ret == -ETIME) && (!signal_pending(current)) ) {
+				ret = 0;
+				pr_err("Int %u active without IRQ, doing WA\n", sl->irq);
+				return ret;
+			}
+			return -EINTR;
+		} else {
+			break;
+		}
 	}
+	/* if we got here, then a real interrupt occured */
+	atomic_set(&sl->cnt_missed, 0);
 
 	return 0;
 }
@@ -816,6 +875,7 @@ static struct file_operations mvIntDrv_fops = {
 static int mvIntDrv_PreInitDrv(void)
 {
 	sema_init(&mvint_pci_devs_sem, 1);
+	pr_info("Using %u timeout on interrupts\n", intdrv_timeout);
 	pr_info("%s: Version: %s\n", __func__, INT_DRV_VER);
 	return 0;
 }
