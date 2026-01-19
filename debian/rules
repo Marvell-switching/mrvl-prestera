@@ -31,6 +31,8 @@ override_dh_auto_build:
 		    ${MOD_SRC_DIR}/debian/mrvlprestera.install.template \
 		    > ${MOD_SRC_DIR}/debian/mrvlprestera.install; \
 	fi
+	cp -f ${MOD_SRC_DIR}/platform/files-overload/sonic.target \
+	      ${MOD_SRC_DIR}/../../../files/build_templates/sonic.target
 
 override_dh_auto_test:
 	# No tests to run
