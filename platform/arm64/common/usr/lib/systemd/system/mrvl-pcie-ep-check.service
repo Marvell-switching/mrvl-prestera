@@ -1,0 +1,15 @@
+[Unit]
+Description=Marvell PCIe-EP check
+DefaultDependencies=no
+After=local-fs.target
+Wants=local-fs.target
+Before=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/mrvl-pcie-ep-check.sh
+
+[Install]
+WantedBy=sysinit.target
+#WantedBy=multi-user.target
+
